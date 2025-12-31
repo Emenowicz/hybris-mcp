@@ -390,6 +390,21 @@ SELECT {pk}, {code}, {name[en]} FROM {Category} WHERE {catalogVersion} IN (
 - The server requires HAC admin access for administrative tools
 - Consider using read-only credentials if you only need OCC API access
 
+## Security Considerations
+
+This MCP server provides powerful administrative access to your Hybris instance:
+
+- **FlexibleSearch**: Can query any data including sensitive tables (users, passwords, tokens)
+- **Groovy Scripts**: Execute arbitrary code with full system access (file system, network, processes)
+- **ImpEx**: Can modify any data in the system including user accounts and permissions
+
+**Recommendations:**
+1. Use dedicated service accounts with minimal required permissions
+2. Enable audit logging on your Hybris instance to track all operations
+3. Never expose the MCP server to untrusted networks or users
+4. Review all Groovy scripts before execution in production environments
+5. Consider network segmentation to restrict access to HAC endpoints
+
 ## Development
 
 ```bash
@@ -420,6 +435,8 @@ For local development with self-signed certificates:
 ```bash
 NODE_TLS_REJECT_UNAUTHORIZED=0 node dist/index.js
 ```
+
+> **WARNING:** Never use `NODE_TLS_REJECT_UNAUTHORIZED=0` in production environments. This disables TLS certificate validation and exposes you to man-in-the-middle attacks. For production, configure proper SSL certificates.
 
 ### CSRF Token Errors
 

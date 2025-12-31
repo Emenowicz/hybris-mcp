@@ -75,6 +75,14 @@ export interface FlexibleSearchResult {
   count: number;
 }
 
+interface FlexSearchHacResponse {
+  resultList?: unknown[][];
+  headers?: string[];
+  query?: string;
+  executionTime?: number;
+  resultCount?: number;
+}
+
 export interface ImpexResult {
   success: boolean;
   message: string;
@@ -133,6 +141,43 @@ export class HybrisClient {
     return Array.from(cookieMap.values());
   }
 
+  /**
+   * Escape a string for safe interpolation in Groovy GStrings.
+   * Prevents code injection via ${...} syntax.
+   */
+  private escapeGroovyString(input: string): string {
+    return input
+      .replace(/\\/g, '\\\\')   // Backslashes first
+      .replace(/"/g, '\\"')     // Double quotes
+      .replace(/\$/g, '\\$')    // Dollar signs (prevents GString injection)
+      .replace(/\n/g, '\\n')    // Newlines
+      .replace(/\r/g, '\\r')    // Carriage returns
+      .replace(/\t/g, '\\t');   // Tabs
+  }
+
+  /**
+   * Sanitize error messages to prevent leaking sensitive information.
+   */
+  private sanitizeErrorMessage(message: string, maxLength = 500): string {
+    let sanitized = message
+      .replace(/password[=:]["']?[^"'\s]+["']?/gi, 'password=***')
+      .replace(/token[=:]["']?[^"'\s]+["']?/gi, 'token=***')
+      .replace(/bearer\s+[^\s]+/gi, 'bearer ***')
+      .replace(/authorization[=:]["']?[^"'\s]+["']?/gi, 'authorization=***');
+
+    if (sanitized.length > maxLength) {
+      sanitized = sanitized.substring(0, maxLength) + '... (truncated)';
+    }
+    return sanitized;
+  }
+
+  /**
+   * Type guard for FlexibleSearch HAC response.
+   */
+  private isFlexSearchResponse(data: unknown): data is FlexSearchHacResponse {
+    return typeof data === 'object' && data !== null;
+  }
+
   private async getAuthHeaders(): Promise<Record<string, string>> {
     const auth = Buffer.from(`${this.config.username}:${this.config.password}`).toString('base64');
     return {
@@ -159,7 +204,7 @@ export class HybrisClient {
 
     if (!response.ok) {
       const errorText = await response.text();
-      throw new Error(`Hybris API error (${response.status}): ${errorText}`);
+      throw new Error(`Hybris API error (${response.status}): ${this.sanitizeErrorMessage(errorText)}`);
     }
 
     const contentType = response.headers.get('content-type');
@@ -338,7 +383,7 @@ export class HybrisClient {
 
     if (!response.ok && response.status !== 302) {
       const errorText = await response.text();
-      throw new Error(`HAC API error (${response.status}): ${errorText}`);
+      throw new Error(`HAC API error (${response.status}): ${this.sanitizeErrorMessage(errorText)}`);
     }
 
     const contentType = response.headers.get('content-type');
@@ -452,12 +497,7 @@ export class HybrisClient {
 
   async importImpex(impexContent: string): Promise<ImpexResult> {
     // Use Groovy script for ImpEx import with ImportService
-    const escapedContent = impexContent
-      .replace(/\\/g, '\\\\')
-      .replace(/"/g, '\\"')
-      .replace(/\n/g, '\\n')
-      .replace(/\r/g, '\\r')
-      .replace(/\t/g, '\\t');
+    const escapedContent = this.escapeGroovyString(impexContent);
 
     const script = `
 import de.hybris.platform.servicelayer.impex.ImportService
@@ -529,7 +569,7 @@ try {
 
   async exportImpex(flexQuery: string): Promise<string> {
     // Use Groovy script for ImpEx export
-    const escapedQuery = flexQuery.replace(/"/g, '\\"');
+    const escapedQuery = this.escapeGroovyString(flexQuery);
 
     const script = `
 try {
@@ -585,8 +625,11 @@ try {
     );
 
     // FlexibleSearch returns resultList as array of arrays, with headers
-    const resultList = (result as unknown as { resultList?: unknown[][] }).resultList || [];
-    const headers = (result as unknown as { headers?: string[] }).headers || ['code', 'active', 'status'];
+    if (!this.isFlexSearchResponse(result)) {
+      return { cronJobs: [] };
+    }
+    const resultList = result.resultList || [];
+    const headers = result.headers || ['code', 'active', 'status'];
 
     const codeIdx = headers.findIndex(h => h.toLowerCase().includes('code'));
     const activeIdx = headers.findIndex(h => h.toLowerCase().includes('active'));
@@ -603,7 +646,7 @@ try {
 
   async triggerCronJob(cronJobCode: string): Promise<{ success: boolean; message: string }> {
     // Use Groovy script to trigger cron job
-    const escapedCode = cronJobCode.replace(/"/g, '\\"');
+    const escapedCode = this.escapeGroovyString(cronJobCode);
     const script = `
 import de.hybris.platform.servicelayer.cronjob.CronJobService
 
@@ -631,7 +674,7 @@ return "SUCCESS"
 
   async clearCache(cacheType?: string): Promise<{ success: boolean; message: string }> {
     // Use Groovy script to clear cache
-    const escapedType = cacheType ? cacheType.replace(/"/g, '\\"') : '';
+    const escapedType = cacheType ? this.escapeGroovyString(cacheType) : '';
     const script = `
 import de.hybris.platform.core.Registry
 
@@ -721,9 +764,9 @@ return groovy.json.JsonOutput.toJson(info)
     targetVersion: string
   ): Promise<{ success: boolean; message: string }> {
     // Use Groovy script to trigger catalog sync by creating a properly configured CronJob
-    const escapedCatalogId = catalogId.replace(/"/g, '\\"');
-    const escapedSource = sourceVersion.replace(/"/g, '\\"');
-    const escapedTarget = targetVersion.replace(/"/g, '\\"');
+    const escapedCatalogId = this.escapeGroovyString(catalogId);
+    const escapedSource = this.escapeGroovyString(sourceVersion);
+    const escapedTarget = this.escapeGroovyString(targetVersion);
     const script = `
 import de.hybris.platform.catalog.model.synchronization.CatalogVersionSyncCronJobModel
 import de.hybris.platform.cronjob.enums.JobLogLevel
