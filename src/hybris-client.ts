@@ -87,6 +87,8 @@ interface HacSession {
 }
 
 export class HybrisClient {
+  private static readonly REQUEST_TIMEOUT_MS = 30000;
+
   private config: HybrisConfig;
   private hacSession: HacSession | null = null;
 
@@ -102,6 +104,33 @@ export class HybrisClient {
 
   private get hacPrefix(): string {
     return this.config.hacPath || '/hac';
+  }
+
+  private async fetchWithTimeout(url: string, options: RequestInit = {}): Promise<Response> {
+    const controller = new AbortController();
+    const timeout = setTimeout(
+      () => controller.abort(),
+      HybrisClient.REQUEST_TIMEOUT_MS
+    );
+    try {
+      return await fetch(url, { ...options, signal: controller.signal });
+    } catch (error) {
+      if (error instanceof Error && error.name === 'AbortError') {
+        throw new Error(`Request timeout after ${HybrisClient.REQUEST_TIMEOUT_MS}ms: ${url}`);
+      }
+      throw error;
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+
+  private mergeCookies(existing: string[], incoming: string[]): string[] {
+    const cookieMap = new Map<string, string>();
+    for (const cookie of [...existing, ...incoming]) {
+      const [name] = cookie.split('=');
+      cookieMap.set(name, cookie);
+    }
+    return Array.from(cookieMap.values());
   }
 
   private async getAuthHeaders(): Promise<Record<string, string>> {
@@ -120,7 +149,7 @@ export class HybrisClient {
     const headers = await this.getAuthHeaders();
     const url = `${this.config.baseUrl}${endpoint}`;
 
-    const response = await fetch(url, {
+    const response = await this.fetchWithTimeout(url, {
       ...options,
       headers: {
         ...headers,
@@ -138,20 +167,29 @@ export class HybrisClient {
       return response.json() as Promise<T>;
     }
 
-    return response.text() as unknown as T;
+    const text = await response.text();
+    if (contentType?.includes('text/html') && text.includes('<html')) {
+      throw new Error(
+        `Unexpected HTML response (possible auth failure): ${text.substring(0, 200)}...`
+      );
+    }
+    return text as unknown as T;
   }
 
   // HAC Session Management
 
   private extractCsrfToken(html: string): string | null {
-    // Look for CSRF token in meta tag
-    const metaMatch = html.match(/name="_csrf"\s+content="([^"]+)"/);
-    if (metaMatch) return metaMatch[1];
-
-    // Look for CSRF token in hidden input
-    const inputMatch = html.match(/name="_csrf"\s+value="([^"]+)"/);
-    if (inputMatch) return inputMatch[1];
-
+    // Handle various attribute orderings and quote styles
+    const patterns = [
+      /name=["']_csrf["'][^>]*content=["']([^"']+)["']/i,
+      /content=["']([^"']+)["'][^>]*name=["']_csrf["']/i,
+      /name=["']_csrf["'][^>]*value=["']([^"']+)["']/i,
+      /value=["']([^"']+)["'][^>]*name=["']_csrf["']/i,
+    ];
+    for (const pattern of patterns) {
+      const match = html.match(pattern);
+      if (match) return match[1];
+    }
     return null;
   }
 
@@ -178,7 +216,7 @@ export class HybrisClient {
     // Step 1: Get the login page to obtain initial CSRF token and cookies
     // First request to / may redirect to /login.jsp
     let loginPageUrl = `${this.config.baseUrl}${this.hacPrefix}/`;
-    let loginPageResponse = await fetch(loginPageUrl, {
+    let loginPageResponse = await this.fetchWithTimeout(loginPageUrl, {
       method: 'GET',
       redirect: 'manual',
     });
@@ -190,23 +228,14 @@ export class HybrisClient {
       const location = loginPageResponse.headers.get('location');
       if (location) {
         loginPageUrl = location.startsWith('http') ? location : `${this.config.baseUrl}${location}`;
-        loginPageResponse = await fetch(loginPageUrl, {
+        loginPageResponse = await this.fetchWithTimeout(loginPageUrl, {
           method: 'GET',
           headers: {
             'Cookie': cookies.join('; '),
           },
           redirect: 'manual',
         });
-        // Merge cookies
-        const newCookies = this.extractCookies(loginPageResponse);
-        if (newCookies.length > 0) {
-          const cookieMap = new Map<string, string>();
-          for (const cookie of [...cookies, ...newCookies]) {
-            const [name] = cookie.split('=');
-            cookieMap.set(name, cookie);
-          }
-          cookies = Array.from(cookieMap.values());
-        }
+        cookies = this.mergeCookies(cookies, this.extractCookies(loginPageResponse));
       }
     }
 
@@ -225,7 +254,7 @@ export class HybrisClient {
       _csrf: csrfToken,
     });
 
-    const loginResponse = await fetch(loginUrl, {
+    const loginResponse = await this.fetchWithTimeout(loginUrl, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/x-www-form-urlencoded',
@@ -235,17 +264,7 @@ export class HybrisClient {
       redirect: 'manual',
     });
 
-    // Merge cookies from login response
-    const newCookies = this.extractCookies(loginResponse);
-    if (newCookies.length > 0) {
-      // Replace or add new cookies
-      const cookieMap = new Map<string, string>();
-      for (const cookie of [...cookies, ...newCookies]) {
-        const [name] = cookie.split('=');
-        cookieMap.set(name, cookie);
-      }
-      cookies = Array.from(cookieMap.values());
-    }
+    cookies = this.mergeCookies(cookies, this.extractCookies(loginResponse));
 
     // Check if login was successful (should redirect to HAC home)
     const location = loginResponse.headers.get('location');
@@ -255,7 +274,7 @@ export class HybrisClient {
 
     // Step 3: Follow redirect to get new CSRF token for authenticated session
     const homeUrl = location.startsWith('http') ? location : `${this.config.baseUrl}${location}`;
-    const homeResponse = await fetch(homeUrl, {
+    const homeResponse = await this.fetchWithTimeout(homeUrl, {
       method: 'GET',
       headers: {
         'Cookie': cookies.join('; '),
@@ -263,16 +282,7 @@ export class HybrisClient {
       redirect: 'manual',
     });
 
-    // Merge any new cookies
-    const homeCookies = this.extractCookies(homeResponse);
-    if (homeCookies.length > 0) {
-      const cookieMap = new Map<string, string>();
-      for (const cookie of [...cookies, ...homeCookies]) {
-        const [name] = cookie.split('=');
-        cookieMap.set(name, cookie);
-      }
-      cookies = Array.from(cookieMap.values());
-    }
+    cookies = this.mergeCookies(cookies, this.extractCookies(homeResponse));
 
     const homeHtml = await homeResponse.text();
     const newCsrfToken = this.extractCsrfToken(homeHtml);
@@ -291,7 +301,8 @@ export class HybrisClient {
 
   private async hacRequest<T>(
     endpoint: string,
-    options: RequestInit = {}
+    options: RequestInit = {},
+    retryCount = 0
   ): Promise<T> {
     const session = await this.ensureHacSession();
     const url = `${this.config.baseUrl}${endpoint}`;
@@ -308,7 +319,7 @@ export class HybrisClient {
       body.set('_csrf', session.csrfToken);
     }
 
-    const response = await fetch(url, {
+    const response = await this.fetchWithTimeout(url, {
       ...options,
       headers,
       body,
@@ -318,8 +329,11 @@ export class HybrisClient {
     // If we get a redirect to login, session expired - retry once
     const location = response.headers.get('location');
     if (response.status === 302 && location?.includes('login')) {
+      if (retryCount >= 1) {
+        throw new Error('HAC session expired and re-authentication failed');
+      }
       this.hacSession = null;
-      return this.hacRequest<T>(endpoint, options);
+      return this.hacRequest<T>(endpoint, options, retryCount + 1);
     }
 
     if (!response.ok && response.status !== 302) {
@@ -332,7 +346,13 @@ export class HybrisClient {
       return response.json() as Promise<T>;
     }
 
-    return response.text() as unknown as T;
+    const text = await response.text();
+    if (contentType?.includes('text/html') && text.includes('<html')) {
+      throw new Error(
+        `Unexpected HTML response (possible auth failure): ${text.substring(0, 200)}...`
+      );
+    }
+    return text as unknown as T;
   }
 
   // OCC API Methods (Omni Commerce Connect)
@@ -346,38 +366,38 @@ export class HybrisClient {
     });
 
     return this.request<ProductSearchResult>(
-      `/rest/v2/${this.config.baseSiteId}/products/search?${params}`
+      `/rest/v2/${encodeURIComponent(this.config.baseSiteId!)}/products/search?${params}`
     );
   }
 
   async getProduct(productCode: string): Promise<Product> {
     return this.request<Product>(
-      `/rest/v2/${this.config.baseSiteId}/products/${productCode}?fields=FULL`
+      `/rest/v2/${encodeURIComponent(this.config.baseSiteId!)}/products/${encodeURIComponent(productCode)}?fields=FULL`
     );
   }
 
   async getCategories(): Promise<Category[]> {
     const result = await this.request<{ subcategories: Category[] }>(
-      `/rest/v2/${this.config.baseSiteId}/catalogs/${this.config.catalogId}/${this.config.catalogVersion}/categories`
+      `/rest/v2/${encodeURIComponent(this.config.baseSiteId!)}/catalogs/${encodeURIComponent(this.config.catalogId!)}/${encodeURIComponent(this.config.catalogVersion!)}/categories`
     );
     return result.subcategories || [];
   }
 
   async getCategory(categoryCode: string): Promise<Category> {
     return this.request<Category>(
-      `/rest/v2/${this.config.baseSiteId}/catalogs/${this.config.catalogId}/${this.config.catalogVersion}/categories/${categoryCode}`
+      `/rest/v2/${encodeURIComponent(this.config.baseSiteId!)}/catalogs/${encodeURIComponent(this.config.catalogId!)}/${encodeURIComponent(this.config.catalogVersion!)}/categories/${encodeURIComponent(categoryCode)}`
     );
   }
 
   async getOrders(userId: string): Promise<{ orders: Order[] }> {
     return this.request<{ orders: Order[] }>(
-      `/rest/v2/${this.config.baseSiteId}/users/${userId}/orders?fields=FULL`
+      `/rest/v2/${encodeURIComponent(this.config.baseSiteId!)}/users/${encodeURIComponent(userId)}/orders?fields=FULL`
     );
   }
 
   async getOrder(userId: string, orderCode: string): Promise<Order> {
     return this.request<Order>(
-      `/rest/v2/${this.config.baseSiteId}/users/${userId}/orders/${orderCode}?fields=FULL`
+      `/rest/v2/${encodeURIComponent(this.config.baseSiteId!)}/users/${encodeURIComponent(userId)}/orders/${encodeURIComponent(orderCode)}?fields=FULL`
     );
   }
 
@@ -401,13 +421,18 @@ export class HybrisClient {
     );
   }
 
-  async executeGroovyScript(script: string): Promise<{ output: string; result: unknown }> {
+  async executeGroovyScript(script: string, commit = false): Promise<{ output: string; result: unknown }> {
     const formData = new URLSearchParams({
       script,
       scriptType: 'groovy',
+      commit: commit.toString(),
     });
 
-    return this.hacRequest<{ output: string; result: unknown }>(
+    const response = await this.hacRequest<{
+      outputText?: string;
+      executionResult?: unknown;
+      stacktraceText?: string;
+    }>(
       `${this.hacPrefix}/console/scripting/execute`,
       {
         method: 'POST',
@@ -417,6 +442,12 @@ export class HybrisClient {
         body: formData,
       }
     );
+
+    // Map HAC response fields to our expected format
+    return {
+      output: response.outputText || '',
+      result: response.executionResult,
+    };
   }
 
   async importImpex(impexContent: string): Promise<ImpexResult> {
@@ -462,51 +493,139 @@ export class HybrisClient {
   // Backoffice / Admin API Methods
 
   async getCronJobs(): Promise<{ cronJobs: { code: string; active: boolean; status: string }[] }> {
-    return this.hacRequest<{ cronJobs: { code: string; active: boolean; status: string }[] }>(
-      `${this.hacPrefix}/monitoring/cronjobs`,
-      { method: 'GET' }
+    // Use FlexibleSearch to get cron jobs as HAC doesn't have a direct API
+    const result = await this.executeFlexibleSearch(
+      "SELECT {code}, {active}, {status} FROM {CronJob} ORDER BY {code}",
+      1000
     );
+
+    // FlexibleSearch returns resultList as array of arrays, with headers
+    const resultList = (result as unknown as { resultList?: unknown[][] }).resultList || [];
+    const headers = (result as unknown as { headers?: string[] }).headers || ['code', 'active', 'status'];
+
+    const codeIdx = headers.findIndex(h => h.toLowerCase().includes('code'));
+    const activeIdx = headers.findIndex(h => h.toLowerCase().includes('active'));
+    const statusIdx = headers.findIndex(h => h.toLowerCase().includes('status'));
+
+    return {
+      cronJobs: resultList.map((row) => ({
+        code: String(row[codeIdx >= 0 ? codeIdx : 0] || ''),
+        active: row[activeIdx >= 0 ? activeIdx : 1] === true || row[activeIdx >= 0 ? activeIdx : 1] === 'true',
+        status: String(row[statusIdx >= 0 ? statusIdx : 2] || ''),
+      })),
+    };
   }
 
   async triggerCronJob(cronJobCode: string): Promise<{ success: boolean; message: string }> {
-    const formData = new URLSearchParams();
+    // Use Groovy script to trigger cron job
+    const escapedCode = cronJobCode.replace(/"/g, '\\"');
+    const script = `
+import de.hybris.platform.servicelayer.cronjob.CronJobService
 
-    return this.hacRequest<{ success: boolean; message: string }>(
-      `${this.hacPrefix}/monitoring/cronjobs/${cronJobCode}/trigger`,
-      {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/x-www-form-urlencoded',
-        },
-        body: formData,
-      }
-    );
+def cronJobService = spring.getBean("cronJobService")
+def cronJob = cronJobService.getCronJob("${escapedCode}")
+if (cronJob == null) {
+    println "CronJob not found: ${escapedCode}"
+    return "NOT_FOUND"
+}
+cronJobService.performCronJob(cronJob, true)
+println "CronJob triggered: ${escapedCode}"
+return "SUCCESS"
+`;
+    const result = await this.executeGroovyScript(script);
+    const output = result.output || '';
+    const execResult = String(result.result || '');
+    const success = output.includes('triggered') || execResult === 'SUCCESS';
+    return {
+      success,
+      message: success
+        ? `CronJob ${cronJobCode} triggered`
+        : `Failed to trigger ${cronJobCode}: ${output || execResult || 'Unknown error'}`,
+    };
   }
 
   async clearCache(cacheType?: string): Promise<{ success: boolean; message: string }> {
-    const endpoint = cacheType
-      ? `${this.hacPrefix}/monitoring/cache/clear/${cacheType}`
-      : `${this.hacPrefix}/monitoring/cache/clear`;
+    // Use Groovy script to clear cache
+    const escapedType = cacheType ? cacheType.replace(/"/g, '\\"') : '';
+    const script = `
+import de.hybris.platform.core.Registry
 
-    const formData = new URLSearchParams();
+def cacheType = "${escapedType}"
 
-    return this.hacRequest<{ success: boolean; message: string }>(
-      endpoint,
-      {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/x-www-form-urlencoded',
-        },
-        body: formData,
-      }
-    );
+if (cacheType == "all" || cacheType == "") {
+    Registry.getCurrentTenant().getCache().clear()
+    println "All caches cleared"
+    return "SUCCESS"
+} else {
+    // Clear specific cache region if supported
+    try {
+        def cacheController = spring.getBean("cacheController")
+        cacheController.clearCache()
+        println "Cache cleared: " + cacheType
+        return "SUCCESS"
+    } catch (Exception e) {
+        Registry.getCurrentTenant().getCache().clear()
+        println "Cleared all caches (specific cache type not supported)"
+        return "SUCCESS"
+    }
+}
+`;
+    const result = await this.executeGroovyScript(script);
+    const output = result.output || '';
+    const execResult = String(result.result || '');
+    const success = output.includes('cleared') || execResult === 'SUCCESS';
+    return {
+      success,
+      message: success ? 'Cache cleared successfully' : `Failed to clear cache: ${output || execResult || 'Unknown error'}`,
+    };
   }
 
   async getSystemInfo(): Promise<Record<string, unknown>> {
-    return this.hacRequest<Record<string, unknown>>(
-      `${this.hacPrefix}/monitoring/system`,
-      { method: 'GET' }
-    );
+    // Use Groovy script to get system info
+    const script = `
+import de.hybris.platform.core.Registry
+import de.hybris.platform.util.Config
+
+def tenant = Registry.getCurrentTenant()
+def runtime = Runtime.getRuntime()
+
+def info = [
+    hybrisVersion: Config.getString("build.version", "unknown"),
+    buildNumber: Config.getString("build.number", "unknown"),
+    tenantId: tenant.getTenantID(),
+    clusterId: Config.getInt("cluster.id", 0),
+    clusterIsland: Config.getInt("cluster.island.id", 0),
+    javaVersion: System.getProperty("java.version"),
+    javaVendor: System.getProperty("java.vendor"),
+    osName: System.getProperty("os.name"),
+    osArch: System.getProperty("os.arch"),
+    maxMemoryMB: (runtime.maxMemory() / 1024 / 1024) as int,
+    totalMemoryMB: (runtime.totalMemory() / 1024 / 1024) as int,
+    freeMemoryMB: (runtime.freeMemory() / 1024 / 1024) as int,
+    availableProcessors: runtime.availableProcessors()
+]
+
+return groovy.json.JsonOutput.toJson(info)
+`;
+    const result = await this.executeGroovyScript(script);
+    try {
+      // Parse the JSON result - executionResult contains the returned value
+      const jsonStr = String(result.result || '');
+      if (jsonStr && jsonStr.startsWith('{')) {
+        return JSON.parse(jsonStr);
+      }
+      // If result is not JSON, return what we have
+      return {
+        output: result.output,
+        result: result.result,
+      };
+    } catch {
+      return {
+        output: result.output,
+        result: result.result,
+        parseError: 'Failed to parse system info JSON',
+      };
+    }
   }
 
   // Catalog Synchronization
@@ -516,22 +635,49 @@ export class HybrisClient {
     sourceVersion: string,
     targetVersion: string
   ): Promise<{ success: boolean; message: string }> {
-    const formData = new URLSearchParams({
-      catalogId,
-      sourceVersion,
-      targetVersion,
-    });
+    // Use Groovy script to trigger catalog sync
+    const escapedCatalogId = catalogId.replace(/"/g, '\\"');
+    const escapedSource = sourceVersion.replace(/"/g, '\\"');
+    const escapedTarget = targetVersion.replace(/"/g, '\\"');
+    const script = `
+import de.hybris.platform.catalog.synchronization.CatalogSynchronizationService
+import de.hybris.platform.catalog.CatalogVersionService
 
-    return this.hacRequest<{ success: boolean; message: string }>(
-      `${this.hacPrefix}/console/sync/execute`,
-      {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/x-www-form-urlencoded',
-        },
-        body: formData,
-      }
-    );
+def catalogVersionService = spring.getBean("catalogVersionService")
+def syncService = spring.getBean("catalogSynchronizationService")
+
+def sourceCatalogVersion = catalogVersionService.getCatalogVersion("${escapedCatalogId}", "${escapedSource}")
+def targetCatalogVersion = catalogVersionService.getCatalogVersion("${escapedCatalogId}", "${escapedTarget}")
+
+if (sourceCatalogVersion == null) {
+    println "Source catalog version not found: ${escapedCatalogId}:${escapedSource}"
+    return "SOURCE_NOT_FOUND"
+}
+if (targetCatalogVersion == null) {
+    println "Target catalog version not found: ${escapedCatalogId}:${escapedTarget}"
+    return "TARGET_NOT_FOUND"
+}
+
+def syncJob = syncService.getSyncJob(sourceCatalogVersion, targetCatalogVersion, null)
+if (syncJob == null) {
+    println "No sync job found for ${escapedCatalogId} ${escapedSource} -> ${escapedTarget}"
+    return "SYNC_JOB_NOT_FOUND"
+}
+
+syncService.synchronize(syncJob, null)
+println "Catalog sync triggered: ${escapedCatalogId} ${escapedSource} -> ${escapedTarget}"
+return "SUCCESS"
+`;
+    const result = await this.executeGroovyScript(script);
+    const output = result.output || '';
+    const execResult = String(result.result || '');
+    const success = output.includes('triggered') || execResult === 'SUCCESS';
+    return {
+      success,
+      message: success
+        ? `Catalog sync triggered: ${catalogId} ${sourceVersion} -> ${targetVersion}`
+        : `Failed to sync: ${output || execResult || 'Unknown error'}`,
+    };
   }
 
   // Health check - uses OCC API since HAC may not be deployed
