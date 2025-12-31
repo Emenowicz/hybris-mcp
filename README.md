@@ -275,23 +275,9 @@ Required environment variables:
 
 ## Available Tools
 
-### Product & Catalog (OCC API)
+### Administration (HAC) - Full Support
 
-| Tool | Description |
-|------|-------------|
-| `search_products` | Search for products in the catalog |
-| `get_product` | Get detailed product information by code |
-| `get_categories` | List all categories in the catalog |
-| `get_category` | Get category details by code |
-
-### Orders (OCC API)
-
-| Tool | Description |
-|------|-------------|
-| `get_orders` | Get orders for a user |
-| `get_order` | Get specific order details |
-
-### Administration (HAC)
+All HAC-based tools work reliably with Basic authentication:
 
 | Tool | Description |
 |------|-------------|
@@ -304,7 +290,25 @@ Required environment variables:
 | `clear_cache` | Clear Hybris caches |
 | `get_system_info` | Get system information |
 | `trigger_catalog_sync` | Sync catalog versions |
-| `health_check` | Check system health |
+
+### Product & Catalog (OCC API)
+
+| Tool | Description | Notes |
+|------|-------------|-------|
+| `health_check` | Check system health | Always works |
+| `get_product` | Get detailed product information by code | Works with Basic auth |
+| `get_category` | Get category details by code | Works with Basic auth |
+| `search_products` | Search for products in the catalog | Requires Solr indexing* |
+| `get_categories` | List all categories in the catalog | Endpoint may not be exposed* |
+
+### Orders (OCC API)
+
+| Tool | Description | Notes |
+|------|-------------|-------|
+| `get_orders` | Get orders for a user | Requires OAuth* |
+| `get_order` | Get specific order details | Requires OAuth* |
+
+*See [Known Limitations](#known-limitations) below.
 
 ## Example Prompts
 
@@ -339,6 +343,44 @@ INSERT_UPDATE Product; code[unique=true]; name[lang=en]; catalogVersion(catalog(
 ### Trigger Catalog Sync
 ```
 Sync the electronics catalog from Staged to Online
+```
+
+## Known Limitations
+
+### OCC Order Endpoints Require OAuth
+
+The `get_orders` and `get_order` tools require OAuth user authentication, not just Basic auth. These endpoints need a user-specific OAuth token obtained via the password grant flow:
+
+```bash
+POST /authorizationserver/oauth/token
+Content-Type: application/x-www-form-urlencoded
+
+grant_type=password&username=user@example.com&password=secret&client_id=mobile_android&client_secret=secret
+```
+
+**Workaround**: Use `flexible_search` to query orders directly:
+```sql
+SELECT {pk}, {code}, {user}, {totalPrice} FROM {Order} WHERE {user} = ?user
+```
+
+### Product Search Requires Solr
+
+The `search_products` tool uses the OCC search endpoint which requires Solr indexing. If your instance uses a different search provider (e.g., Algolia), this endpoint may return empty results.
+
+**Workaround**: Use `flexible_search` to query products:
+```sql
+SELECT {pk}, {code}, {name[en]} FROM {Product} WHERE {name[en]} LIKE '%search_term%'
+```
+
+### Categories Endpoint May Not Be Exposed
+
+The `get_categories` tool uses an OCC endpoint that may not be exposed in all Hybris configurations.
+
+**Workaround**: Use `flexible_search` to query categories:
+```sql
+SELECT {pk}, {code}, {name[en]} FROM {Category} WHERE {catalogVersion} IN (
+  {{ SELECT {pk} FROM {CatalogVersion} WHERE {version} = 'Online' }}
+)
 ```
 
 ## Security Notes
