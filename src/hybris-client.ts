@@ -75,6 +75,14 @@ export interface FlexibleSearchResult {
   count: number;
 }
 
+interface FlexSearchHacResponse {
+  resultList?: unknown[][];
+  headers?: string[];
+  query?: string;
+  executionTime?: number;
+  resultCount?: number;
+}
+
 export interface ImpexResult {
   success: boolean;
   message: string;
@@ -133,6 +141,43 @@ export class HybrisClient {
     return Array.from(cookieMap.values());
   }
 
+  /**
+   * Escape a string for safe interpolation in Groovy GStrings.
+   * Prevents code injection via ${...} syntax.
+   */
+  private escapeGroovyString(input: string): string {
+    return input
+      .replace(/\\/g, '\\\\')   // Backslashes first
+      .replace(/"/g, '\\"')     // Double quotes
+      .replace(/\$/g, '\\$')    // Dollar signs (prevents GString injection)
+      .replace(/\n/g, '\\n')    // Newlines
+      .replace(/\r/g, '\\r')    // Carriage returns
+      .replace(/\t/g, '\\t');   // Tabs
+  }
+
+  /**
+   * Sanitize error messages to prevent leaking sensitive information.
+   */
+  private sanitizeErrorMessage(message: string, maxLength = 500): string {
+    let sanitized = message
+      .replace(/password[=:]["']?[^"'\s]+["']?/gi, 'password=***')
+      .replace(/token[=:]["']?[^"'\s]+["']?/gi, 'token=***')
+      .replace(/bearer\s+[^\s]+/gi, 'bearer ***')
+      .replace(/authorization[=:]["']?[^"'\s]+["']?/gi, 'authorization=***');
+
+    if (sanitized.length > maxLength) {
+      sanitized = sanitized.substring(0, maxLength) + '... (truncated)';
+    }
+    return sanitized;
+  }
+
+  /**
+   * Type guard for FlexibleSearch HAC response.
+   */
+  private isFlexSearchResponse(data: unknown): data is FlexSearchHacResponse {
+    return typeof data === 'object' && data !== null;
+  }
+
   private async getAuthHeaders(): Promise<Record<string, string>> {
     const auth = Buffer.from(`${this.config.username}:${this.config.password}`).toString('base64');
     return {
@@ -159,7 +204,7 @@ export class HybrisClient {
 
     if (!response.ok) {
       const errorText = await response.text();
-      throw new Error(`Hybris API error (${response.status}): ${errorText}`);
+      throw new Error(`Hybris API error (${response.status}): ${this.sanitizeErrorMessage(errorText)}`);
     }
 
     const contentType = response.headers.get('content-type');
@@ -338,7 +383,7 @@ export class HybrisClient {
 
     if (!response.ok && response.status !== 302) {
       const errorText = await response.text();
-      throw new Error(`HAC API error (${response.status}): ${errorText}`);
+      throw new Error(`HAC API error (${response.status}): ${this.sanitizeErrorMessage(errorText)}`);
     }
 
     const contentType = response.headers.get('content-type');
@@ -451,43 +496,123 @@ export class HybrisClient {
   }
 
   async importImpex(impexContent: string): Promise<ImpexResult> {
-    const formData = new URLSearchParams({
-      scriptContent: impexContent,
-    });
+    // Use Groovy script for ImpEx import with ImportService
+    const escapedContent = this.escapeGroovyString(impexContent);
 
-    const result = await this.hacRequest<{ success: boolean; output: string; errors?: string[] }>(
-      `${this.hacPrefix}/console/impex/import`,
-      {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/x-www-form-urlencoded',
-        },
-        body: formData,
-      }
-    );
+    const script = `
+import de.hybris.platform.servicelayer.impex.ImportService
+import de.hybris.platform.servicelayer.impex.ImportConfig
+import de.hybris.platform.servicelayer.impex.impl.StreamBasedImpExResource
+
+try {
+    def impexContent = "${escapedContent}"
+    def importService = spring.getBean("importService")
+
+    def config = new ImportConfig()
+    def resource = new StreamBasedImpExResource(
+        new ByteArrayInputStream(impexContent.getBytes("UTF-8")),
+        "UTF-8"
+    )
+    config.setScript(resource)
+    config.setEnableCodeExecution(true)
+
+    def importResult = importService.importData(config)
+
+    if (importResult.hasUnresolvedLines()) {
+        println "WARNING: Import completed with unresolved lines"
+        importResult.unresolvedLines.allLines.each { line ->
+            println "  Unresolved: " + line
+        }
+    }
+
+    if (importResult.isError()) {
+        println "ERROR: Import failed"
+        if (importResult.unresolvedLines?.allLines) {
+            importResult.unresolvedLines.allLines.each { line ->
+                println "  Error: " + line
+            }
+        }
+        return "ERROR"
+    }
+
+    println "SUCCESS: ImpEx import completed"
+    return "SUCCESS"
+} catch (Exception e) {
+    println "ERROR: " + e.getMessage()
+    e.printStackTrace()
+    return "ERROR: " + e.getMessage()
+}
+`;
+    const result = await this.executeGroovyScript(script, true); // commit=true for imports
+    const output = result.output || '';
+    const execResult = String(result.result || '');
+    const success = output.includes('SUCCESS:') || execResult === 'SUCCESS';
+    const errors: string[] = [];
+
+    // Extract unresolved lines as errors
+    const unresolvedMatch = output.match(/Unresolved: (.+)/g);
+    if (unresolvedMatch) {
+      errors.push(...unresolvedMatch);
+    }
+
+    const errorMatch = output.match(/ERROR: (.+)/);
+    if (errorMatch) {
+      errors.push(errorMatch[1]);
+    }
 
     return {
-      success: result.success,
-      message: result.output,
-      errors: result.errors,
+      success,
+      message: output || execResult,
+      errors: errors.length > 0 ? errors : undefined,
     };
   }
 
   async exportImpex(flexQuery: string): Promise<string> {
-    const formData = new URLSearchParams({
-      flexibleSearchQuery: flexQuery,
-    });
+    // Use Groovy script for ImpEx export
+    const escapedQuery = this.escapeGroovyString(flexQuery);
 
-    return this.hacRequest<string>(
-      `${this.hacPrefix}/console/impex/export`,
-      {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/x-www-form-urlencoded',
-        },
-        body: formData,
-      }
-    );
+    const script = `
+try {
+    def flexibleSearchService = spring.getBean("flexibleSearchService")
+    def query = "${escapedQuery}"
+    def searchResult = flexibleSearchService.search(query)
+
+    if (searchResult.result.isEmpty()) {
+        println "No results found for query"
+        return "# No results found"
+    }
+
+    // Build ImpEx header from first item
+    def firstItem = searchResult.result[0]
+    def itemType = firstItem.itemtype  // Use lowercase 'itemtype' property
+
+    def sb = new StringBuilder()
+    sb.append("# Exported from FlexibleSearch: ").append(query).append("\\n")
+    sb.append("# Result count: ").append(searchResult.totalCount).append("\\n\\n")
+
+    // Simple export format
+    sb.append("INSERT_UPDATE ").append(itemType).append(";pk[unique=true]\\n")
+    searchResult.result.each { item ->
+        sb.append(";").append(item.PK.toString()).append("\\n")
+    }
+
+    println "SUCCESS: Exported " + searchResult.result.size() + " items"
+    return sb.toString()
+} catch (Exception e) {
+    println "ERROR: " + e.getMessage()
+    e.printStackTrace()
+    return "# Error: " + e.getMessage()
+}
+`;
+    const result = await this.executeGroovyScript(script);
+    const execResult = String(result.result || '');
+
+    // If result looks like ImpEx content, return it
+    if (execResult.includes('INSERT_UPDATE') || execResult.includes('# ')) {
+      return execResult;
+    }
+
+    return result.output || execResult || '# Export failed';
   }
 
   // Backoffice / Admin API Methods
@@ -500,8 +625,11 @@ export class HybrisClient {
     );
 
     // FlexibleSearch returns resultList as array of arrays, with headers
-    const resultList = (result as unknown as { resultList?: unknown[][] }).resultList || [];
-    const headers = (result as unknown as { headers?: string[] }).headers || ['code', 'active', 'status'];
+    if (!this.isFlexSearchResponse(result)) {
+      return { cronJobs: [] };
+    }
+    const resultList = result.resultList || [];
+    const headers = result.headers || ['code', 'active', 'status'];
 
     const codeIdx = headers.findIndex(h => h.toLowerCase().includes('code'));
     const activeIdx = headers.findIndex(h => h.toLowerCase().includes('active'));
@@ -518,7 +646,7 @@ export class HybrisClient {
 
   async triggerCronJob(cronJobCode: string): Promise<{ success: boolean; message: string }> {
     // Use Groovy script to trigger cron job
-    const escapedCode = cronJobCode.replace(/"/g, '\\"');
+    const escapedCode = this.escapeGroovyString(cronJobCode);
     const script = `
 import de.hybris.platform.servicelayer.cronjob.CronJobService
 
@@ -546,7 +674,7 @@ return "SUCCESS"
 
   async clearCache(cacheType?: string): Promise<{ success: boolean; message: string }> {
     // Use Groovy script to clear cache
-    const escapedType = cacheType ? cacheType.replace(/"/g, '\\"') : '';
+    const escapedType = cacheType ? this.escapeGroovyString(cacheType) : '';
     const script = `
 import de.hybris.platform.core.Registry
 
@@ -635,48 +763,85 @@ return groovy.json.JsonOutput.toJson(info)
     sourceVersion: string,
     targetVersion: string
   ): Promise<{ success: boolean; message: string }> {
-    // Use Groovy script to trigger catalog sync
-    const escapedCatalogId = catalogId.replace(/"/g, '\\"');
-    const escapedSource = sourceVersion.replace(/"/g, '\\"');
-    const escapedTarget = targetVersion.replace(/"/g, '\\"');
+    // Use Groovy script to trigger catalog sync by creating a properly configured CronJob
+    const escapedCatalogId = this.escapeGroovyString(catalogId);
+    const escapedSource = this.escapeGroovyString(sourceVersion);
+    const escapedTarget = this.escapeGroovyString(targetVersion);
     const script = `
-import de.hybris.platform.catalog.synchronization.CatalogSynchronizationService
-import de.hybris.platform.catalog.CatalogVersionService
+import de.hybris.platform.catalog.model.synchronization.CatalogVersionSyncCronJobModel
+import de.hybris.platform.cronjob.enums.JobLogLevel
 
-def catalogVersionService = spring.getBean("catalogVersionService")
-def syncService = spring.getBean("catalogSynchronizationService")
+try {
+    def catalogVersionService = spring.getBean("catalogVersionService")
+    def modelService = spring.getBean("modelService")
+    def cronJobService = spring.getBean("cronJobService")
+    def flexibleSearchService = spring.getBean("flexibleSearchService")
 
-def sourceCatalogVersion = catalogVersionService.getCatalogVersion("${escapedCatalogId}", "${escapedSource}")
-def targetCatalogVersion = catalogVersionService.getCatalogVersion("${escapedCatalogId}", "${escapedTarget}")
+    def sourceCatalogVersion = catalogVersionService.getCatalogVersion("${escapedCatalogId}", "${escapedSource}")
+    def targetCatalogVersion = catalogVersionService.getCatalogVersion("${escapedCatalogId}", "${escapedTarget}")
 
-if (sourceCatalogVersion == null) {
-    println "Source catalog version not found: ${escapedCatalogId}:${escapedSource}"
-    return "SOURCE_NOT_FOUND"
+    if (sourceCatalogVersion == null) {
+        println "ERROR: Source catalog version not found: ${escapedCatalogId}:${escapedSource}"
+        return "SOURCE_NOT_FOUND"
+    }
+    if (targetCatalogVersion == null) {
+        println "ERROR: Target catalog version not found: ${escapedCatalogId}:${escapedTarget}"
+        return "TARGET_NOT_FOUND"
+    }
+
+    // Find sync job using flexible search
+    def query = "SELECT {pk} FROM {CatalogVersionSyncJob} WHERE {sourceVersion} = ?source AND {targetVersion} = ?target"
+    def params = [source: sourceCatalogVersion, target: targetCatalogVersion]
+    def searchResult = flexibleSearchService.search(query, params)
+
+    if (searchResult.result.isEmpty()) {
+        println "ERROR: No sync job found for ${escapedCatalogId} ${escapedSource} -> ${escapedTarget}"
+        println "Available sync jobs:"
+        def allJobs = flexibleSearchService.search("SELECT {pk}, {code} FROM {CatalogVersionSyncJob}").result
+        allJobs.each { job -> println "  - " + job.code }
+        return "SYNC_JOB_NOT_FOUND"
+    }
+
+    def syncJob = searchResult.result[0]
+    println "Found sync job: " + syncJob.code
+
+    // Create a new CronJob with all mandatory attributes
+    def syncCronJob = modelService.create(CatalogVersionSyncCronJobModel.class)
+    syncCronJob.setJob(syncJob)
+    syncCronJob.setCode("mcp_sync_" + System.currentTimeMillis())
+
+    // Set all mandatory attributes
+    syncCronJob.setCreateSavedValues(false)
+    syncCronJob.setForceUpdate(false)
+    syncCronJob.setLogToDatabase(false)
+    syncCronJob.setLogToFile(false)
+    syncCronJob.setLogLevelDatabase(JobLogLevel.WARNING)
+    syncCronJob.setLogLevelFile(JobLogLevel.WARNING)
+
+    modelService.save(syncCronJob)
+    println "Created sync cronjob: " + syncCronJob.code
+
+    // Trigger the cronjob
+    cronJobService.performCronJob(syncCronJob, true)
+
+    println "SUCCESS: Catalog sync triggered: ${escapedCatalogId} ${escapedSource} -> ${escapedTarget}"
+    return "SUCCESS"
+} catch (Exception e) {
+    println "ERROR: " + e.getMessage()
+    e.printStackTrace()
+    return "ERROR: " + e.getMessage()
 }
-if (targetCatalogVersion == null) {
-    println "Target catalog version not found: ${escapedCatalogId}:${escapedTarget}"
-    return "TARGET_NOT_FOUND"
-}
-
-def syncJob = syncService.getSyncJob(sourceCatalogVersion, targetCatalogVersion, null)
-if (syncJob == null) {
-    println "No sync job found for ${escapedCatalogId} ${escapedSource} -> ${escapedTarget}"
-    return "SYNC_JOB_NOT_FOUND"
-}
-
-syncService.synchronize(syncJob, null)
-println "Catalog sync triggered: ${escapedCatalogId} ${escapedSource} -> ${escapedTarget}"
-return "SUCCESS"
 `;
     const result = await this.executeGroovyScript(script);
     const output = result.output || '';
     const execResult = String(result.result || '');
-    const success = output.includes('triggered') || execResult === 'SUCCESS';
+    const success = output.includes('SUCCESS:') || execResult === 'SUCCESS';
+    const errorMatch = output.match(/ERROR: (.+)/);
     return {
       success,
       message: success
         ? `Catalog sync triggered: ${catalogId} ${sourceVersion} -> ${targetVersion}`
-        : `Failed to sync: ${output || execResult || 'Unknown error'}`,
+        : errorMatch ? errorMatch[1] : `Failed to sync: ${output || execResult || 'Unknown error'}`,
     };
   }
 
