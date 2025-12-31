@@ -115,6 +115,164 @@ Add to your Claude Desktop configuration (`~/Library/Application Support/Claude/
 }
 ```
 
+## Usage with Cursor
+
+Add to your Cursor MCP configuration (`~/.cursor/mcp.json`):
+
+```json
+{
+  "mcpServers": {
+    "hybris": {
+      "command": "node",
+      "args": ["/path/to/hybris-mcp/dist/index.js"],
+      "env": {
+        "HYBRIS_BASE_URL": "https://localhost:9002",
+        "HYBRIS_USERNAME": "admin",
+        "HYBRIS_PASSWORD": "nimda"
+      }
+    }
+  }
+}
+```
+
+## Usage with Windsurf
+
+Add to your Windsurf MCP configuration (`~/.codeium/windsurf/mcp_config.json`):
+
+```json
+{
+  "mcpServers": {
+    "hybris": {
+      "command": "node",
+      "args": ["/path/to/hybris-mcp/dist/index.js"],
+      "env": {
+        "HYBRIS_BASE_URL": "https://localhost:9002",
+        "HYBRIS_USERNAME": "admin",
+        "HYBRIS_PASSWORD": "nimda"
+      }
+    }
+  }
+}
+```
+
+## Usage with VS Code (Copilot/Continue/Cline)
+
+For VS Code extensions that support MCP, add to your workspace `.vscode/mcp.json`:
+
+```json
+{
+  "servers": {
+    "hybris": {
+      "command": "node",
+      "args": ["/path/to/hybris-mcp/dist/index.js"],
+      "env": {
+        "HYBRIS_BASE_URL": "https://localhost:9002",
+        "HYBRIS_USERNAME": "admin",
+        "HYBRIS_PASSWORD": "nimda"
+      }
+    }
+  }
+}
+```
+
+## Usage with Zed
+
+Add to your Zed settings (`~/.config/zed/settings.json`):
+
+```json
+{
+  "context_servers": {
+    "hybris": {
+      "command": {
+        "path": "node",
+        "args": ["/path/to/hybris-mcp/dist/index.js"],
+        "env": {
+          "HYBRIS_BASE_URL": "https://localhost:9002",
+          "HYBRIS_USERNAME": "admin",
+          "HYBRIS_PASSWORD": "nimda"
+        }
+      }
+    }
+  }
+}
+```
+
+## Usage with JetBrains IDEs
+
+For IntelliJ IDEA, WebStorm, PyCharm, and other JetBrains IDEs with AI Assistant, add to your MCP configuration:
+
+**macOS/Linux:** `~/.config/JetBrains/mcp.json`
+**Windows:** `%APPDATA%\JetBrains\mcp.json`
+
+```json
+{
+  "mcpServers": {
+    "hybris": {
+      "command": "node",
+      "args": ["/path/to/hybris-mcp/dist/index.js"],
+      "env": {
+        "HYBRIS_BASE_URL": "https://localhost:9002",
+        "HYBRIS_USERNAME": "admin",
+        "HYBRIS_PASSWORD": "nimda"
+      }
+    }
+  }
+}
+```
+
+## Usage with Sourcegraph Cody
+
+Add to your Cody MCP configuration (`~/.config/cody/mcp.json`):
+
+```json
+{
+  "mcpServers": {
+    "hybris": {
+      "command": "node",
+      "args": ["/path/to/hybris-mcp/dist/index.js"],
+      "env": {
+        "HYBRIS_BASE_URL": "https://localhost:9002",
+        "HYBRIS_USERNAME": "admin",
+        "HYBRIS_PASSWORD": "nimda"
+      }
+    }
+  }
+}
+```
+
+## Usage with Raycast
+
+Add to your Raycast AI extension MCP settings (`~/.config/raycast/mcp.json`):
+
+```json
+{
+  "mcpServers": {
+    "hybris": {
+      "command": "node",
+      "args": ["/path/to/hybris-mcp/dist/index.js"],
+      "env": {
+        "HYBRIS_BASE_URL": "https://localhost:9002",
+        "HYBRIS_USERNAME": "admin",
+        "HYBRIS_PASSWORD": "nimda"
+      }
+    }
+  }
+}
+```
+
+## Generic MCP Configuration
+
+For any other MCP-compatible client, the server uses **stdio transport**. Run with:
+
+```bash
+node /path/to/hybris-mcp/dist/index.js
+```
+
+Required environment variables:
+- `HYBRIS_BASE_URL`
+- `HYBRIS_USERNAME`
+- `HYBRIS_PASSWORD`
+
 ## Available Tools
 
 ### Product & Catalog (OCC API)
