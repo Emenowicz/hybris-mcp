@@ -87,6 +87,8 @@ interface HacSession {
 }
 
 export class HybrisClient {
+  private static readonly REQUEST_TIMEOUT_MS = 30000;
+
   private config: HybrisConfig;
   private hacSession: HacSession | null = null;
 
@@ -102,6 +104,33 @@ export class HybrisClient {
 
   private get hacPrefix(): string {
     return this.config.hacPath || '/hac';
+  }
+
+  private async fetchWithTimeout(url: string, options: RequestInit = {}): Promise<Response> {
+    const controller = new AbortController();
+    const timeout = setTimeout(
+      () => controller.abort(),
+      HybrisClient.REQUEST_TIMEOUT_MS
+    );
+    try {
+      return await fetch(url, { ...options, signal: controller.signal });
+    } catch (error) {
+      if (error instanceof Error && error.name === 'AbortError') {
+        throw new Error(`Request timeout after ${HybrisClient.REQUEST_TIMEOUT_MS}ms: ${url}`);
+      }
+      throw error;
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+
+  private mergeCookies(existing: string[], incoming: string[]): string[] {
+    const cookieMap = new Map<string, string>();
+    for (const cookie of [...existing, ...incoming]) {
+      const [name] = cookie.split('=');
+      cookieMap.set(name, cookie);
+    }
+    return Array.from(cookieMap.values());
   }
 
   private async getAuthHeaders(): Promise<Record<string, string>> {
@@ -120,7 +149,7 @@ export class HybrisClient {
     const headers = await this.getAuthHeaders();
     const url = `${this.config.baseUrl}${endpoint}`;
 
-    const response = await fetch(url, {
+    const response = await this.fetchWithTimeout(url, {
       ...options,
       headers: {
         ...headers,
@@ -138,20 +167,29 @@ export class HybrisClient {
       return response.json() as Promise<T>;
     }
 
-    return response.text() as unknown as T;
+    const text = await response.text();
+    if (contentType?.includes('text/html') && text.includes('<html')) {
+      throw new Error(
+        `Unexpected HTML response (possible auth failure): ${text.substring(0, 200)}...`
+      );
+    }
+    return text as unknown as T;
   }
 
   // HAC Session Management
 
   private extractCsrfToken(html: string): string | null {
-    // Look for CSRF token in meta tag
-    const metaMatch = html.match(/name="_csrf"\s+content="([^"]+)"/);
-    if (metaMatch) return metaMatch[1];
-
-    // Look for CSRF token in hidden input
-    const inputMatch = html.match(/name="_csrf"\s+value="([^"]+)"/);
-    if (inputMatch) return inputMatch[1];
-
+    // Handle various attribute orderings and quote styles
+    const patterns = [
+      /name=["']_csrf["'][^>]*content=["']([^"']+)["']/i,
+      /content=["']([^"']+)["'][^>]*name=["']_csrf["']/i,
+      /name=["']_csrf["'][^>]*value=["']([^"']+)["']/i,
+      /value=["']([^"']+)["'][^>]*name=["']_csrf["']/i,
+    ];
+    for (const pattern of patterns) {
+      const match = html.match(pattern);
+      if (match) return match[1];
+    }
     return null;
   }
 
@@ -178,7 +216,7 @@ export class HybrisClient {
     // Step 1: Get the login page to obtain initial CSRF token and cookies
     // First request to / may redirect to /login.jsp
     let loginPageUrl = `${this.config.baseUrl}${this.hacPrefix}/`;
-    let loginPageResponse = await fetch(loginPageUrl, {
+    let loginPageResponse = await this.fetchWithTimeout(loginPageUrl, {
       method: 'GET',
       redirect: 'manual',
     });
@@ -190,23 +228,14 @@ export class HybrisClient {
       const location = loginPageResponse.headers.get('location');
       if (location) {
         loginPageUrl = location.startsWith('http') ? location : `${this.config.baseUrl}${location}`;
-        loginPageResponse = await fetch(loginPageUrl, {
+        loginPageResponse = await this.fetchWithTimeout(loginPageUrl, {
           method: 'GET',
           headers: {
             'Cookie': cookies.join('; '),
           },
           redirect: 'manual',
         });
-        // Merge cookies
-        const newCookies = this.extractCookies(loginPageResponse);
-        if (newCookies.length > 0) {
-          const cookieMap = new Map<string, string>();
-          for (const cookie of [...cookies, ...newCookies]) {
-            const [name] = cookie.split('=');
-            cookieMap.set(name, cookie);
-          }
-          cookies = Array.from(cookieMap.values());
-        }
+        cookies = this.mergeCookies(cookies, this.extractCookies(loginPageResponse));
       }
     }
 
@@ -225,7 +254,7 @@ export class HybrisClient {
       _csrf: csrfToken,
     });
 
-    const loginResponse = await fetch(loginUrl, {
+    const loginResponse = await this.fetchWithTimeout(loginUrl, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/x-www-form-urlencoded',
@@ -235,17 +264,7 @@ export class HybrisClient {
       redirect: 'manual',
     });
 
-    // Merge cookies from login response
-    const newCookies = this.extractCookies(loginResponse);
-    if (newCookies.length > 0) {
-      // Replace or add new cookies
-      const cookieMap = new Map<string, string>();
-      for (const cookie of [...cookies, ...newCookies]) {
-        const [name] = cookie.split('=');
-        cookieMap.set(name, cookie);
-      }
-      cookies = Array.from(cookieMap.values());
-    }
+    cookies = this.mergeCookies(cookies, this.extractCookies(loginResponse));
 
     // Check if login was successful (should redirect to HAC home)
     const location = loginResponse.headers.get('location');
@@ -255,7 +274,7 @@ export class HybrisClient {
 
     // Step 3: Follow redirect to get new CSRF token for authenticated session
     const homeUrl = location.startsWith('http') ? location : `${this.config.baseUrl}${location}`;
-    const homeResponse = await fetch(homeUrl, {
+    const homeResponse = await this.fetchWithTimeout(homeUrl, {
       method: 'GET',
       headers: {
         'Cookie': cookies.join('; '),
@@ -263,16 +282,7 @@ export class HybrisClient {
       redirect: 'manual',
     });
 
-    // Merge any new cookies
-    const homeCookies = this.extractCookies(homeResponse);
-    if (homeCookies.length > 0) {
-      const cookieMap = new Map<string, string>();
-      for (const cookie of [...cookies, ...homeCookies]) {
-        const [name] = cookie.split('=');
-        cookieMap.set(name, cookie);
-      }
-      cookies = Array.from(cookieMap.values());
-    }
+    cookies = this.mergeCookies(cookies, this.extractCookies(homeResponse));
 
     const homeHtml = await homeResponse.text();
     const newCsrfToken = this.extractCsrfToken(homeHtml);
@@ -291,7 +301,8 @@ export class HybrisClient {
 
   private async hacRequest<T>(
     endpoint: string,
-    options: RequestInit = {}
+    options: RequestInit = {},
+    retryCount = 0
   ): Promise<T> {
     const session = await this.ensureHacSession();
     const url = `${this.config.baseUrl}${endpoint}`;
@@ -308,7 +319,7 @@ export class HybrisClient {
       body.set('_csrf', session.csrfToken);
     }
 
-    const response = await fetch(url, {
+    const response = await this.fetchWithTimeout(url, {
       ...options,
       headers,
       body,
@@ -318,8 +329,11 @@ export class HybrisClient {
     // If we get a redirect to login, session expired - retry once
     const location = response.headers.get('location');
     if (response.status === 302 && location?.includes('login')) {
+      if (retryCount >= 1) {
+        throw new Error('HAC session expired and re-authentication failed');
+      }
       this.hacSession = null;
-      return this.hacRequest<T>(endpoint, options);
+      return this.hacRequest<T>(endpoint, options, retryCount + 1);
     }
 
     if (!response.ok && response.status !== 302) {
@@ -332,7 +346,13 @@ export class HybrisClient {
       return response.json() as Promise<T>;
     }
 
-    return response.text() as unknown as T;
+    const text = await response.text();
+    if (contentType?.includes('text/html') && text.includes('<html')) {
+      throw new Error(
+        `Unexpected HTML response (possible auth failure): ${text.substring(0, 200)}...`
+      );
+    }
+    return text as unknown as T;
   }
 
   // OCC API Methods (Omni Commerce Connect)
@@ -346,38 +366,38 @@ export class HybrisClient {
     });
 
     return this.request<ProductSearchResult>(
-      `/rest/v2/${this.config.baseSiteId}/products/search?${params}`
+      `/rest/v2/${encodeURIComponent(this.config.baseSiteId!)}/products/search?${params}`
     );
   }
 
   async getProduct(productCode: string): Promise<Product> {
     return this.request<Product>(
-      `/rest/v2/${this.config.baseSiteId}/products/${productCode}?fields=FULL`
+      `/rest/v2/${encodeURIComponent(this.config.baseSiteId!)}/products/${encodeURIComponent(productCode)}?fields=FULL`
     );
   }
 
   async getCategories(): Promise<Category[]> {
     const result = await this.request<{ subcategories: Category[] }>(
-      `/rest/v2/${this.config.baseSiteId}/catalogs/${this.config.catalogId}/${this.config.catalogVersion}/categories`
+      `/rest/v2/${encodeURIComponent(this.config.baseSiteId!)}/catalogs/${encodeURIComponent(this.config.catalogId!)}/${encodeURIComponent(this.config.catalogVersion!)}/categories`
     );
     return result.subcategories || [];
   }
 
   async getCategory(categoryCode: string): Promise<Category> {
     return this.request<Category>(
-      `/rest/v2/${this.config.baseSiteId}/catalogs/${this.config.catalogId}/${this.config.catalogVersion}/categories/${categoryCode}`
+      `/rest/v2/${encodeURIComponent(this.config.baseSiteId!)}/catalogs/${encodeURIComponent(this.config.catalogId!)}/${encodeURIComponent(this.config.catalogVersion!)}/categories/${encodeURIComponent(categoryCode)}`
     );
   }
 
   async getOrders(userId: string): Promise<{ orders: Order[] }> {
     return this.request<{ orders: Order[] }>(
-      `/rest/v2/${this.config.baseSiteId}/users/${userId}/orders?fields=FULL`
+      `/rest/v2/${encodeURIComponent(this.config.baseSiteId!)}/users/${encodeURIComponent(userId)}/orders?fields=FULL`
     );
   }
 
   async getOrder(userId: string, orderCode: string): Promise<Order> {
     return this.request<Order>(
-      `/rest/v2/${this.config.baseSiteId}/users/${userId}/orders/${orderCode}?fields=FULL`
+      `/rest/v2/${encodeURIComponent(this.config.baseSiteId!)}/users/${encodeURIComponent(userId)}/orders/${encodeURIComponent(orderCode)}?fields=FULL`
     );
   }
 
@@ -472,7 +492,7 @@ export class HybrisClient {
     const formData = new URLSearchParams();
 
     return this.hacRequest<{ success: boolean; message: string }>(
-      `${this.hacPrefix}/monitoring/cronjobs/${cronJobCode}/trigger`,
+      `${this.hacPrefix}/monitoring/cronjobs/${encodeURIComponent(cronJobCode)}/trigger`,
       {
         method: 'POST',
         headers: {
@@ -485,7 +505,7 @@ export class HybrisClient {
 
   async clearCache(cacheType?: string): Promise<{ success: boolean; message: string }> {
     const endpoint = cacheType
-      ? `${this.hacPrefix}/monitoring/cache/clear/${cacheType}`
+      ? `${this.hacPrefix}/monitoring/cache/clear/${encodeURIComponent(cacheType)}`
       : `${this.hacPrefix}/monitoring/cache/clear`;
 
     const formData = new URLSearchParams();

@@ -1,5 +1,8 @@
 #!/usr/bin/env node
 
+import { readFileSync } from 'fs';
+import { fileURLToPath } from 'url';
+import { dirname, join } from 'path';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import {
@@ -8,6 +11,55 @@ import {
   Tool,
 } from '@modelcontextprotocol/sdk/types.js';
 import { HybrisClient, HybrisConfig } from './hybris-client.js';
+
+// Read version from package.json
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const pkg = JSON.parse(readFileSync(join(__dirname, '../package.json'), 'utf-8'));
+
+// Input validation helpers
+function validateString(
+  args: Record<string, unknown> | undefined,
+  key: string,
+  required: true
+): string;
+function validateString(
+  args: Record<string, unknown> | undefined,
+  key: string,
+  required: false
+): string | undefined;
+function validateString(
+  args: Record<string, unknown> | undefined,
+  key: string,
+  required: boolean
+): string | undefined {
+  const value = args?.[key];
+  if (required && (value === undefined || value === null)) {
+    throw new Error(`${key} is required`);
+  }
+  if (value !== undefined && value !== null && typeof value !== 'string') {
+    throw new Error(`${key} must be a string`);
+  }
+  return value as string | undefined;
+}
+
+function validateNumber(
+  args: Record<string, unknown> | undefined,
+  key: string,
+  opts?: { min?: number; max?: number }
+): number | undefined {
+  const value = args?.[key];
+  if (value === undefined || value === null) return undefined;
+  if (typeof value !== 'number') {
+    throw new Error(`${key} must be a number`);
+  }
+  if (opts?.min !== undefined && value < opts.min) {
+    throw new Error(`${key} must be at least ${opts.min}`);
+  }
+  if (opts?.max !== undefined && value > opts.max) {
+    throw new Error(`${key} must be at most ${opts.max}`);
+  }
+  return value;
+}
 
 // Load configuration from environment variables
 function getConfig(): HybrisConfig {
@@ -268,7 +320,7 @@ async function main() {
   const server = new Server(
     {
       name: 'hybris-mcp',
-      version: '1.0.0',
+      version: pkg.version,
     },
     {
       capabilities: {
@@ -276,6 +328,15 @@ async function main() {
       },
     }
   );
+
+  // Graceful shutdown handlers
+  const shutdown = async () => {
+    console.error('Shutting down Hybris MCP server...');
+    await server.close();
+    process.exit(0);
+  };
+  process.on('SIGINT', shutdown);
+  process.on('SIGTERM', shutdown);
 
   // Handle list tools request
   server.setRequestHandler(ListToolsRequestSchema, async () => {
@@ -292,14 +353,16 @@ async function main() {
       switch (name) {
         case 'search_products':
           result = await hybrisClient.searchProducts(
-            args?.query as string,
-            args?.pageSize as number,
-            args?.currentPage as number
+            validateString(args, 'query', true),
+            validateNumber(args, 'pageSize', { min: 1, max: 100 }),
+            validateNumber(args, 'currentPage', { min: 0 })
           );
           break;
 
         case 'get_product':
-          result = await hybrisClient.getProduct(args?.productCode as string);
+          result = await hybrisClient.getProduct(
+            validateString(args, 'productCode', true)
+          );
           break;
 
         case 'get_categories':
@@ -307,37 +370,47 @@ async function main() {
           break;
 
         case 'get_category':
-          result = await hybrisClient.getCategory(args?.categoryCode as string);
+          result = await hybrisClient.getCategory(
+            validateString(args, 'categoryCode', true)
+          );
           break;
 
         case 'get_orders':
-          result = await hybrisClient.getOrders(args?.userId as string);
+          result = await hybrisClient.getOrders(
+            validateString(args, 'userId', true)
+          );
           break;
 
         case 'get_order':
           result = await hybrisClient.getOrder(
-            args?.userId as string,
-            args?.orderCode as string
+            validateString(args, 'userId', true),
+            validateString(args, 'orderCode', true)
           );
           break;
 
         case 'flexible_search':
           result = await hybrisClient.executeFlexibleSearch(
-            args?.query as string,
-            args?.maxCount as number
+            validateString(args, 'query', true),
+            validateNumber(args, 'maxCount', { min: 1, max: 10000 })
           );
           break;
 
         case 'execute_groovy':
-          result = await hybrisClient.executeGroovyScript(args?.script as string);
+          result = await hybrisClient.executeGroovyScript(
+            validateString(args, 'script', true)
+          );
           break;
 
         case 'import_impex':
-          result = await hybrisClient.importImpex(args?.impexContent as string);
+          result = await hybrisClient.importImpex(
+            validateString(args, 'impexContent', true)
+          );
           break;
 
         case 'export_impex':
-          result = await hybrisClient.exportImpex(args?.flexQuery as string);
+          result = await hybrisClient.exportImpex(
+            validateString(args, 'flexQuery', true)
+          );
           break;
 
         case 'get_cronjobs':
@@ -345,11 +418,15 @@ async function main() {
           break;
 
         case 'trigger_cronjob':
-          result = await hybrisClient.triggerCronJob(args?.cronJobCode as string);
+          result = await hybrisClient.triggerCronJob(
+            validateString(args, 'cronJobCode', true)
+          );
           break;
 
         case 'clear_cache':
-          result = await hybrisClient.clearCache(args?.cacheType as string | undefined);
+          result = await hybrisClient.clearCache(
+            validateString(args, 'cacheType', false)
+          );
           break;
 
         case 'get_system_info':
@@ -358,9 +435,9 @@ async function main() {
 
         case 'trigger_catalog_sync':
           result = await hybrisClient.triggerCatalogSync(
-            args?.catalogId as string,
-            args?.sourceVersion as string,
-            args?.targetVersion as string
+            validateString(args, 'catalogId', true),
+            validateString(args, 'sourceVersion', true),
+            validateString(args, 'targetVersion', true)
           );
           break;
 
