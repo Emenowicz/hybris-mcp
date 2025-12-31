@@ -61,6 +61,19 @@ function validateNumber(
   return value;
 }
 
+function validateBoolean(
+  args: Record<string, unknown> | undefined,
+  key: string,
+  defaultValue = false
+): boolean {
+  const value = args?.[key];
+  if (value === undefined || value === null) return defaultValue;
+  if (typeof value !== 'boolean') {
+    throw new Error(`${key} must be a boolean`);
+  }
+  return value;
+}
+
 // Load configuration from environment variables
 function getConfig(): HybrisConfig {
   const baseUrl = process.env.HYBRIS_BASE_URL;
@@ -205,6 +218,10 @@ const tools: Tool[] = [
         script: {
           type: 'string',
           description: 'Groovy script to execute',
+        },
+        commit: {
+          type: 'boolean',
+          description: 'Whether to commit database changes (default: false)',
         },
       },
       required: ['script'],
@@ -397,7 +414,8 @@ async function main() {
 
         case 'execute_groovy':
           result = await hybrisClient.executeGroovyScript(
-            validateString(args, 'script', true)
+            validateString(args, 'script', true),
+            validateBoolean(args, 'commit', false)
           );
           break;
 

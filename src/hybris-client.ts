@@ -421,13 +421,18 @@ export class HybrisClient {
     );
   }
 
-  async executeGroovyScript(script: string): Promise<{ output: string; result: unknown }> {
+  async executeGroovyScript(script: string, commit = false): Promise<{ output: string; result: unknown }> {
     const formData = new URLSearchParams({
       script,
       scriptType: 'groovy',
+      commit: commit.toString(),
     });
 
-    return this.hacRequest<{ output: string; result: unknown }>(
+    const response = await this.hacRequest<{
+      outputText?: string;
+      executionResult?: unknown;
+      stacktraceText?: string;
+    }>(
       `${this.hacPrefix}/console/scripting/execute`,
       {
         method: 'POST',
@@ -437,6 +442,12 @@ export class HybrisClient {
         body: formData,
       }
     );
+
+    // Map HAC response fields to our expected format
+    return {
+      output: response.outputText || '',
+      result: response.executionResult,
+    };
   }
 
   async importImpex(impexContent: string): Promise<ImpexResult> {
@@ -482,51 +493,139 @@ export class HybrisClient {
   // Backoffice / Admin API Methods
 
   async getCronJobs(): Promise<{ cronJobs: { code: string; active: boolean; status: string }[] }> {
-    return this.hacRequest<{ cronJobs: { code: string; active: boolean; status: string }[] }>(
-      `${this.hacPrefix}/monitoring/cronjobs`,
-      { method: 'GET' }
+    // Use FlexibleSearch to get cron jobs as HAC doesn't have a direct API
+    const result = await this.executeFlexibleSearch(
+      "SELECT {code}, {active}, {status} FROM {CronJob} ORDER BY {code}",
+      1000
     );
+
+    // FlexibleSearch returns resultList as array of arrays, with headers
+    const resultList = (result as unknown as { resultList?: unknown[][] }).resultList || [];
+    const headers = (result as unknown as { headers?: string[] }).headers || ['code', 'active', 'status'];
+
+    const codeIdx = headers.findIndex(h => h.toLowerCase().includes('code'));
+    const activeIdx = headers.findIndex(h => h.toLowerCase().includes('active'));
+    const statusIdx = headers.findIndex(h => h.toLowerCase().includes('status'));
+
+    return {
+      cronJobs: resultList.map((row) => ({
+        code: String(row[codeIdx >= 0 ? codeIdx : 0] || ''),
+        active: row[activeIdx >= 0 ? activeIdx : 1] === true || row[activeIdx >= 0 ? activeIdx : 1] === 'true',
+        status: String(row[statusIdx >= 0 ? statusIdx : 2] || ''),
+      })),
+    };
   }
 
   async triggerCronJob(cronJobCode: string): Promise<{ success: boolean; message: string }> {
-    const formData = new URLSearchParams();
+    // Use Groovy script to trigger cron job
+    const escapedCode = cronJobCode.replace(/"/g, '\\"');
+    const script = `
+import de.hybris.platform.servicelayer.cronjob.CronJobService
 
-    return this.hacRequest<{ success: boolean; message: string }>(
-      `${this.hacPrefix}/monitoring/cronjobs/${encodeURIComponent(cronJobCode)}/trigger`,
-      {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/x-www-form-urlencoded',
-        },
-        body: formData,
-      }
-    );
+def cronJobService = spring.getBean("cronJobService")
+def cronJob = cronJobService.getCronJob("${escapedCode}")
+if (cronJob == null) {
+    println "CronJob not found: ${escapedCode}"
+    return "NOT_FOUND"
+}
+cronJobService.performCronJob(cronJob, true)
+println "CronJob triggered: ${escapedCode}"
+return "SUCCESS"
+`;
+    const result = await this.executeGroovyScript(script);
+    const output = result.output || '';
+    const execResult = String(result.result || '');
+    const success = output.includes('triggered') || execResult === 'SUCCESS';
+    return {
+      success,
+      message: success
+        ? `CronJob ${cronJobCode} triggered`
+        : `Failed to trigger ${cronJobCode}: ${output || execResult || 'Unknown error'}`,
+    };
   }
 
   async clearCache(cacheType?: string): Promise<{ success: boolean; message: string }> {
-    const endpoint = cacheType
-      ? `${this.hacPrefix}/monitoring/cache/clear/${encodeURIComponent(cacheType)}`
-      : `${this.hacPrefix}/monitoring/cache/clear`;
+    // Use Groovy script to clear cache
+    const escapedType = cacheType ? cacheType.replace(/"/g, '\\"') : '';
+    const script = `
+import de.hybris.platform.core.Registry
 
-    const formData = new URLSearchParams();
+def cacheType = "${escapedType}"
 
-    return this.hacRequest<{ success: boolean; message: string }>(
-      endpoint,
-      {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/x-www-form-urlencoded',
-        },
-        body: formData,
-      }
-    );
+if (cacheType == "all" || cacheType == "") {
+    Registry.getCurrentTenant().getCache().clear()
+    println "All caches cleared"
+    return "SUCCESS"
+} else {
+    // Clear specific cache region if supported
+    try {
+        def cacheController = spring.getBean("cacheController")
+        cacheController.clearCache()
+        println "Cache cleared: " + cacheType
+        return "SUCCESS"
+    } catch (Exception e) {
+        Registry.getCurrentTenant().getCache().clear()
+        println "Cleared all caches (specific cache type not supported)"
+        return "SUCCESS"
+    }
+}
+`;
+    const result = await this.executeGroovyScript(script);
+    const output = result.output || '';
+    const execResult = String(result.result || '');
+    const success = output.includes('cleared') || execResult === 'SUCCESS';
+    return {
+      success,
+      message: success ? 'Cache cleared successfully' : `Failed to clear cache: ${output || execResult || 'Unknown error'}`,
+    };
   }
 
   async getSystemInfo(): Promise<Record<string, unknown>> {
-    return this.hacRequest<Record<string, unknown>>(
-      `${this.hacPrefix}/monitoring/system`,
-      { method: 'GET' }
-    );
+    // Use Groovy script to get system info
+    const script = `
+import de.hybris.platform.core.Registry
+import de.hybris.platform.util.Config
+
+def tenant = Registry.getCurrentTenant()
+def runtime = Runtime.getRuntime()
+
+def info = [
+    hybrisVersion: Config.getString("build.version", "unknown"),
+    buildNumber: Config.getString("build.number", "unknown"),
+    tenantId: tenant.getTenantID(),
+    clusterId: Config.getInt("cluster.id", 0),
+    clusterIsland: Config.getInt("cluster.island.id", 0),
+    javaVersion: System.getProperty("java.version"),
+    javaVendor: System.getProperty("java.vendor"),
+    osName: System.getProperty("os.name"),
+    osArch: System.getProperty("os.arch"),
+    maxMemoryMB: (runtime.maxMemory() / 1024 / 1024) as int,
+    totalMemoryMB: (runtime.totalMemory() / 1024 / 1024) as int,
+    freeMemoryMB: (runtime.freeMemory() / 1024 / 1024) as int,
+    availableProcessors: runtime.availableProcessors()
+]
+
+return groovy.json.JsonOutput.toJson(info)
+`;
+    const result = await this.executeGroovyScript(script);
+    try {
+      // Parse the JSON result - executionResult contains the returned value
+      const jsonStr = String(result.result || '');
+      if (jsonStr && jsonStr.startsWith('{')) {
+        return JSON.parse(jsonStr);
+      }
+      // If result is not JSON, return what we have
+      return {
+        output: result.output,
+        result: result.result,
+      };
+    } catch {
+      return {
+        output: result.output,
+        result: result.result,
+        parseError: 'Failed to parse system info JSON',
+      };
+    }
   }
 
   // Catalog Synchronization
@@ -536,22 +635,49 @@ export class HybrisClient {
     sourceVersion: string,
     targetVersion: string
   ): Promise<{ success: boolean; message: string }> {
-    const formData = new URLSearchParams({
-      catalogId,
-      sourceVersion,
-      targetVersion,
-    });
+    // Use Groovy script to trigger catalog sync
+    const escapedCatalogId = catalogId.replace(/"/g, '\\"');
+    const escapedSource = sourceVersion.replace(/"/g, '\\"');
+    const escapedTarget = targetVersion.replace(/"/g, '\\"');
+    const script = `
+import de.hybris.platform.catalog.synchronization.CatalogSynchronizationService
+import de.hybris.platform.catalog.CatalogVersionService
 
-    return this.hacRequest<{ success: boolean; message: string }>(
-      `${this.hacPrefix}/console/sync/execute`,
-      {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/x-www-form-urlencoded',
-        },
-        body: formData,
-      }
-    );
+def catalogVersionService = spring.getBean("catalogVersionService")
+def syncService = spring.getBean("catalogSynchronizationService")
+
+def sourceCatalogVersion = catalogVersionService.getCatalogVersion("${escapedCatalogId}", "${escapedSource}")
+def targetCatalogVersion = catalogVersionService.getCatalogVersion("${escapedCatalogId}", "${escapedTarget}")
+
+if (sourceCatalogVersion == null) {
+    println "Source catalog version not found: ${escapedCatalogId}:${escapedSource}"
+    return "SOURCE_NOT_FOUND"
+}
+if (targetCatalogVersion == null) {
+    println "Target catalog version not found: ${escapedCatalogId}:${escapedTarget}"
+    return "TARGET_NOT_FOUND"
+}
+
+def syncJob = syncService.getSyncJob(sourceCatalogVersion, targetCatalogVersion, null)
+if (syncJob == null) {
+    println "No sync job found for ${escapedCatalogId} ${escapedSource} -> ${escapedTarget}"
+    return "SYNC_JOB_NOT_FOUND"
+}
+
+syncService.synchronize(syncJob, null)
+println "Catalog sync triggered: ${escapedCatalogId} ${escapedSource} -> ${escapedTarget}"
+return "SUCCESS"
+`;
+    const result = await this.executeGroovyScript(script);
+    const output = result.output || '';
+    const execResult = String(result.result || '');
+    const success = output.includes('triggered') || execResult === 'SUCCESS';
+    return {
+      success,
+      message: success
+        ? `Catalog sync triggered: ${catalogId} ${sourceVersion} -> ${targetVersion}`
+        : `Failed to sync: ${output || execResult || 'Unknown error'}`,
+    };
   }
 
   // Health check - uses OCC API since HAC may not be deployed
