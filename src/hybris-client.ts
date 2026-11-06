@@ -371,9 +371,9 @@ export class HybrisClient {
       redirect: 'manual',
     });
 
-    // If we get a redirect to login, session expired - retry once
+    // Expired session: 302 to login, or 405 (CSRF rejected after Hybris restart) - retry once
     const location = response.headers.get('location');
-    if (response.status === 302 && location?.includes('login')) {
+    if ((response.status === 302 && location?.includes('login')) || response.status === 405) {
       if (retryCount >= 1) {
         throw new Error('HAC session expired and re-authentication failed');
       }
