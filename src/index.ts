@@ -92,10 +92,11 @@ function getConfig(): HybrisConfig {
     baseUrl,
     username,
     password,
-    baseSiteId: process.env.HYBRIS_BASE_SITE_ID || 'electronics',
-    catalogId: process.env.HYBRIS_CATALOG_ID || 'electronicsProductCatalog',
-    catalogVersion: process.env.HYBRIS_CATALOG_VERSION || 'Online',
-    hacPath: process.env.HYBRIS_HAC_PATH || '/hac',
+    baseSiteId: process.env.HYBRIS_BASE_SITE_ID ?? 'electronics',
+    catalogId: process.env.HYBRIS_CATALOG_ID ?? 'electronicsProductCatalog',
+    catalogVersion: process.env.HYBRIS_CATALOG_VERSION ?? 'Online',
+    hacPath: process.env.HYBRIS_HAC_PATH ?? '/hac',
+    occPath: process.env.HYBRIS_OCC_PATH ?? '/occ',
   };
 }
 

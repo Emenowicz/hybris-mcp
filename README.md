@@ -36,6 +36,7 @@ Configure via environment variables:
 | `HYBRIS_CATALOG_ID` | No | Product catalog ID | `electronicsProductCatalog` |
 | `HYBRIS_CATALOG_VERSION` | No | Catalog version | `Online` |
 | `HYBRIS_HAC_PATH` | No | HAC path prefix | `/hac` |
+| `HYBRIS_OCC_PATH` | No | OCC web services path prefix | `/occ` |
 
 ### Common Configurations
 
