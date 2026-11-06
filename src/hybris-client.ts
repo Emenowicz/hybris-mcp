@@ -6,10 +6,11 @@ export interface HybrisConfig {
   baseUrl: string;
   username: string;
   password: string;
-  baseSiteId?: string;
-  catalogId?: string;
-  catalogVersion?: string;
-  hacPath?: string; // HAC path prefix, defaults to '/hac'
+  baseSiteId: string;
+  catalogId: string;
+  catalogVersion: string;
+  hacPath: string; // HAC path prefix, defaults to '/hac'
+  occPath: string; // OCC path prefix, defaults to '/occ'
 }
 
 export interface ProductSearchResult {
@@ -101,17 +102,7 @@ export class HybrisClient {
   private hacSession: HacSession | null = null;
 
   constructor(config: HybrisConfig) {
-    this.config = {
-      baseSiteId: 'electronics',
-      catalogId: 'electronicsProductCatalog',
-      catalogVersion: 'Online',
-      hacPath: '/hac',
-      ...config,
-    };
-  }
-
-  private get hacPrefix(): string {
-    return this.config.hacPath || '/hac';
+    this.config = config;
   }
 
   private async fetchWithTimeout(url: string, options: RequestInit = {}): Promise<Response> {
@@ -260,7 +251,7 @@ export class HybrisClient {
 
     // Step 1: Get the login page to obtain initial CSRF token and cookies
     // First request to / may redirect to /login.jsp
-    let loginPageUrl = `${this.config.baseUrl}${this.hacPrefix}/`;
+    let loginPageUrl = `${this.config.baseUrl}${this.config.hacPath}/`;
     let loginPageResponse = await this.fetchWithTimeout(loginPageUrl, {
       method: 'GET',
       redirect: 'manual',
@@ -292,7 +283,7 @@ export class HybrisClient {
     }
 
     // Step 2: Submit login form
-    const loginUrl = `${this.config.baseUrl}${this.hacPrefix}/j_spring_security_check`;
+    const loginUrl = `${this.config.baseUrl}${this.config.hacPath}/j_spring_security_check`;
     const loginBody = new URLSearchParams({
       j_username: this.config.username,
       j_password: this.config.password,
@@ -411,38 +402,38 @@ export class HybrisClient {
     });
 
     return this.request<ProductSearchResult>(
-      `/rest/v2/${encodeURIComponent(this.config.baseSiteId!)}/products/search?${params}`
+      `${this.config.occPath}/v2/${encodeURIComponent(this.config.baseSiteId)}/products/search?${params}`
     );
   }
 
   async getProduct(productCode: string): Promise<Product> {
     return this.request<Product>(
-      `/rest/v2/${encodeURIComponent(this.config.baseSiteId!)}/products/${encodeURIComponent(productCode)}?fields=FULL`
+      `${this.config.occPath}/v2/${encodeURIComponent(this.config.baseSiteId)}/products/${encodeURIComponent(productCode)}?fields=FULL`
     );
   }
 
   async getCategories(): Promise<Category[]> {
-    const result = await this.request<{ subcategories: Category[] }>(
-      `/rest/v2/${encodeURIComponent(this.config.baseSiteId!)}/catalogs/${encodeURIComponent(this.config.catalogId!)}/${encodeURIComponent(this.config.catalogVersion!)}/categories`
+    const result = await this.request<{ categories: Category[] }>(
+      `${this.config.occPath}/v2/${encodeURIComponent(this.config.baseSiteId)}/catalogs/${encodeURIComponent(this.config.catalogId)}/${encodeURIComponent(this.config.catalogVersion)}`
     );
-    return result.subcategories || [];
+    return result.categories || [];
   }
 
   async getCategory(categoryCode: string): Promise<Category> {
     return this.request<Category>(
-      `/rest/v2/${encodeURIComponent(this.config.baseSiteId!)}/catalogs/${encodeURIComponent(this.config.catalogId!)}/${encodeURIComponent(this.config.catalogVersion!)}/categories/${encodeURIComponent(categoryCode)}`
+      `${this.config.occPath}/v2/${encodeURIComponent(this.config.baseSiteId)}/catalogs/${encodeURIComponent(this.config.catalogId)}/${encodeURIComponent(this.config.catalogVersion)}/categories/${encodeURIComponent(categoryCode)}`
     );
   }
 
   async getOrders(userId: string): Promise<{ orders: Order[] }> {
     return this.request<{ orders: Order[] }>(
-      `/rest/v2/${encodeURIComponent(this.config.baseSiteId!)}/users/${encodeURIComponent(userId)}/orders?fields=FULL`
+      `${this.config.occPath}/v2/${encodeURIComponent(this.config.baseSiteId)}/users/${encodeURIComponent(userId)}/orders?fields=FULL`
     );
   }
 
   async getOrder(userId: string, orderCode: string): Promise<Order> {
     return this.request<Order>(
-      `/rest/v2/${encodeURIComponent(this.config.baseSiteId!)}/users/${encodeURIComponent(userId)}/orders/${encodeURIComponent(orderCode)}?fields=FULL`
+      `${this.config.occPath}/v2/${encodeURIComponent(this.config.baseSiteId)}/users/${encodeURIComponent(userId)}/orders/${encodeURIComponent(orderCode)}?fields=FULL`
     );
   }
 
@@ -455,7 +446,7 @@ export class HybrisClient {
     });
 
     return this.hacRequest<FlexibleSearchResult>(
-      `${this.hacPrefix}/console/flexsearch/execute`,
+      `${this.config.hacPath}/console/flexsearch/execute`,
       {
         method: 'POST',
         headers: {
@@ -478,7 +469,7 @@ export class HybrisClient {
       executionResult?: unknown;
       stacktraceText?: string;
     }>(
-      `${this.hacPrefix}/console/scripting/execute`,
+      `${this.config.hacPath}/console/scripting/execute`,
       {
         method: 'POST',
         headers: {
