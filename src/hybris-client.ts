@@ -488,6 +488,14 @@ export class HybrisClient {
       }
     );
 
+    // A script that throws comes back as HTTP 200 with only stacktraceText set
+    if (response.stacktraceText) {
+      const output = response.outputText ? `\nOutput before failure:\n${response.outputText}` : '';
+      throw new Error(
+        `Groovy script failed:\n${this.sanitizeErrorMessage(response.stacktraceText, 2000)}${output}`
+      );
+    }
+
     // Map HAC response fields to our expected format
     return {
       output: response.outputText || '',
@@ -656,47 +664,31 @@ if (cronJob == null) {
     println "CronJob not found: ${escapedCode}"
     return "NOT_FOUND"
 }
-cronJobService.performCronJob(cronJob, true)
+// Asynchronous: a long job must not outlive the HTTP request timeout
+cronJobService.performCronJob(cronJob, false)
 println "CronJob triggered: ${escapedCode}"
 return "SUCCESS"
 `;
-    const result = await this.executeGroovyScript(script);
+    // commit=true: the job runs in another thread, outside this script's transaction
+    const result = await this.executeGroovyScript(script, true);
     const output = result.output || '';
     const execResult = String(result.result || '');
     const success = output.includes('triggered') || execResult === 'SUCCESS';
     return {
       success,
       message: success
-        ? `CronJob ${cronJobCode} triggered`
+        ? `CronJob ${cronJobCode} started`
         : `Failed to trigger ${cronJobCode}: ${output || execResult || 'Unknown error'}`,
     };
   }
 
-  async clearCache(cacheType?: string): Promise<{ success: boolean; message: string }> {
-    // Use Groovy script to clear cache
-    const escapedType = cacheType ? this.escapeGroovyString(cacheType) : '';
+  async clearCache(): Promise<{ success: boolean; message: string }> {
     const script = `
 import de.hybris.platform.core.Registry
 
-def cacheType = "${escapedType}"
-
-if (cacheType == "all" || cacheType == "") {
-    Registry.getCurrentTenant().getCache().clear()
-    println "All caches cleared"
-    return "SUCCESS"
-} else {
-    // Clear specific cache region if supported
-    try {
-        def cacheController = spring.getBean("cacheController")
-        cacheController.clearCache()
-        println "Cache cleared: " + cacheType
-        return "SUCCESS"
-    } catch (Exception e) {
-        Registry.getCurrentTenant().getCache().clear()
-        println "Cleared all caches (specific cache type not supported)"
-        return "SUCCESS"
-    }
-}
+Registry.getCurrentTenant().getCache().clear()
+println "All caches cleared"
+return "SUCCESS"
 `;
     const result = await this.executeGroovyScript(script);
     const output = result.output || '';
@@ -821,8 +813,8 @@ try {
     modelService.save(syncCronJob)
     println "Created sync cronjob: " + syncCronJob.code
 
-    // Trigger the cronjob
-    cronJobService.performCronJob(syncCronJob, true)
+    // Trigger the cronjob asynchronously: a sync can run far longer than the HTTP request timeout
+    cronJobService.performCronJob(syncCronJob, false)
 
     println "SUCCESS: Catalog sync triggered: ${escapedCatalogId} ${escapedSource} -> ${escapedTarget}"
     return "SUCCESS"
@@ -832,15 +824,17 @@ try {
     return "ERROR: " + e.getMessage()
 }
 `;
-    const result = await this.executeGroovyScript(script);
+    // commit=true: the saved cronjob must be visible to the thread that runs it
+    const result = await this.executeGroovyScript(script, true);
     const output = result.output || '';
     const execResult = String(result.result || '');
     const success = output.includes('SUCCESS:') || execResult === 'SUCCESS';
     const errorMatch = output.match(/ERROR: (.+)/);
+    const cronJobCode = output.match(/Created sync cronjob: (\S+)/)?.[1];
     return {
       success,
       message: success
-        ? `Catalog sync triggered: ${catalogId} ${sourceVersion} -> ${targetVersion}`
+        ? `Catalog sync started: ${catalogId} ${sourceVersion} -> ${targetVersion} (cron job ${cronJobCode ?? 'unknown'})`
         : errorMatch ? errorMatch[1] : `Failed to sync: ${output || execResult || 'Unknown error'}`,
     };
   }
