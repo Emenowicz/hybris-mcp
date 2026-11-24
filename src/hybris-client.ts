@@ -9,9 +9,9 @@ export interface HybrisConfig {
   baseSiteId?: string;
   catalogId?: string;
   catalogVersion?: string;
-  hacPath?: string; // HAC path prefix, defaults to '/hac'
+  hacPath?: string; // HAC path prefix, defaults to '' (web root, the SAP Commerce default)
   occBaseUrl?: string; // OCC host when it differs from HAC (e.g. the api.* host on CCv2), defaults to baseUrl
-  occPath?: string; // OCC path prefix, defaults to '/rest/v2'; current SAP Commerce uses '/occ/v2'
+  occPath?: string; // OCC path prefix, defaults to '/occ/v2' (the SAP Commerce default)
 }
 
 export interface ProductSearchResult {
@@ -107,13 +107,13 @@ export class HybrisClient {
       baseSiteId: 'electronics',
       catalogId: 'electronicsProductCatalog',
       catalogVersion: 'Online',
-      hacPath: '/hac',
+      hacPath: '',
       ...config,
     };
   }
 
   private get hacPrefix(): string {
-    return this.config.hacPath ?? '/hac'; // '' is valid: HAC deployed at the web root
+    return this.config.hacPath ?? '';
   }
 
   private async fetchWithTimeout(url: string, options: RequestInit = {}): Promise<Response> {
@@ -194,7 +194,7 @@ export class HybrisClient {
     options: RequestInit = {}
   ): Promise<T> {
     const headers = await this.getAuthHeaders();
-    const url = `${this.config.occBaseUrl || this.config.baseUrl}${this.config.occPath ?? '/rest/v2'}${endpoint}`;
+    const url = `${this.config.occBaseUrl || this.config.baseUrl}${this.config.occPath ?? '/occ/v2'}${endpoint}`;
 
     const response = await this.fetchWithTimeout(url, {
       ...options,

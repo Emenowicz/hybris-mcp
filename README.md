@@ -35,8 +35,8 @@ Configure via environment variables:
 | `HYBRIS_BASE_SITE_ID` | No | OCC base site ID | `electronics` |
 | `HYBRIS_CATALOG_ID` | No | Product catalog ID | `electronicsProductCatalog` |
 | `HYBRIS_CATALOG_VERSION` | No | Catalog version | `Online` |
-| `HYBRIS_HAC_PATH` | No | HAC path prefix. Set it to an empty value when HAC is deployed at the web root | `/hac` |
-| `HYBRIS_OCC_PATH` | No | OCC path prefix. Current SAP Commerce (`commercewebservices`) uses `/occ/v2` | `/rest/v2` |
+| `HYBRIS_HAC_PATH` | No | HAC path prefix. Set it to `/hac` when `hac.webroot=/hac` (CCv2 and most accelerator setups) | empty (web root) |
+| `HYBRIS_OCC_PATH` | No | OCC path prefix. Legacy `ycommercewebservices` setups use `/rest/v2` | `/occ/v2` |
 | `HYBRIS_OCC_BASE_URL` | No | OCC host, when it differs from the HAC host (e.g. the `api.*` host on CCv2) | `HYBRIS_BASE_URL` |
 
 ### Common Configurations
@@ -55,7 +55,6 @@ HYBRIS_USERNAME=admin
 HYBRIS_PASSWORD=your-password
 HYBRIS_HAC_PATH=/hac
 HYBRIS_OCC_BASE_URL=https://api.your-environment.model-t.cc.commerce.ondemand.com
-HYBRIS_OCC_PATH=/occ/v2
 ```
 
 **Custom Site Configuration:**
