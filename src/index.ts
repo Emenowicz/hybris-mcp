@@ -85,7 +85,7 @@ function getConfig(): HybrisConfig {
     baseSiteId: process.env.HYBRIS_BASE_SITE_ID || 'electronics',
     catalogId: process.env.HYBRIS_CATALOG_ID || 'electronicsProductCatalog',
     catalogVersion: process.env.HYBRIS_CATALOG_VERSION || 'Online',
-    hacPath: process.env.HYBRIS_HAC_PATH || '/hac',
+    hacPath: process.env.HYBRIS_HAC_PATH ?? '/hac',
   };
 }
 

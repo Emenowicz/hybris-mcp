@@ -111,7 +111,7 @@ export class HybrisClient {
   }
 
   private get hacPrefix(): string {
-    return this.config.hacPath || '/hac';
+    return this.config.hacPath ?? '/hac'; // '' is valid: HAC deployed at the web root
   }
 
   private async fetchWithTimeout(url: string, options: RequestInit = {}): Promise<Response> {
@@ -454,7 +454,7 @@ export class HybrisClient {
       maxCount: maxCount.toString(),
     });
 
-    return this.hacRequest<FlexibleSearchResult>(
+    const result = await this.hacRequest<FlexibleSearchResult & { exception?: { message?: string } | null }>(
       `${this.hacPrefix}/console/flexsearch/execute`,
       {
         method: 'POST',
@@ -464,6 +464,14 @@ export class HybrisClient {
         body: formData,
       }
     );
+
+    // A failed query comes back as HTTP 200 with a serialized Java exception
+    if (result.exception) {
+      throw new Error(
+        `FlexibleSearch failed: ${this.sanitizeErrorMessage(result.exception.message || 'unknown error', 2000)}`
+      );
+    }
+    return result;
   }
 
   async executeGroovyScript(script: string, commit = false): Promise<{ output: string; result: unknown }> {
@@ -601,7 +609,7 @@ try {
     // Simple export format
     sb.append("INSERT_UPDATE ").append(itemType).append(";pk[unique=true]\\n")
     searchResult.result.each { item ->
-        sb.append(";").append(item.PK.toString()).append("\\n")
+        sb.append(";").append(item.pk.toString()).append("\\n")
     }
 
     println "SUCCESS: Exported " + searchResult.result.size() + " items"
@@ -628,7 +636,8 @@ try {
   async getCronJobs(): Promise<{ cronJobs: { code: string; active: boolean; status: string }[] }> {
     // Use FlexibleSearch to get cron jobs as HAC doesn't have a direct API
     const result = await this.executeFlexibleSearch(
-      "SELECT {code}, {active}, {status} FROM {CronJob} ORDER BY {code}",
+      // status is an enum reference: without the join it comes back as a raw PK
+      "SELECT {c.code} AS code, {c.active} AS active, {s.code} AS status FROM {CronJob AS c LEFT JOIN CronJobStatus AS s ON {c.status} = {s.pk}} ORDER BY {c.code}",
       1000
     );
 
@@ -646,7 +655,8 @@ try {
     return {
       cronJobs: resultList.map((row) => ({
         code: String(row[codeIdx >= 0 ? codeIdx : 0] || ''),
-        active: row[activeIdx >= 0 ? activeIdx : 1] === true || row[activeIdx >= 0 ? activeIdx : 1] === 'true',
+        // HAC serializes booleans as "1"/"0" on some databases and "true"/"false" on others
+        active: ['true', '1'].includes(String(row[activeIdx >= 0 ? activeIdx : 1])),
         status: String(row[statusIdx >= 0 ? statusIdx : 2] || ''),
       })),
     };
