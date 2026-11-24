@@ -86,6 +86,8 @@ function getConfig(): HybrisConfig {
     catalogId: process.env.HYBRIS_CATALOG_ID || 'electronicsProductCatalog',
     catalogVersion: process.env.HYBRIS_CATALOG_VERSION || 'Online',
     hacPath: process.env.HYBRIS_HAC_PATH ?? '/hac',
+    occBaseUrl: process.env.HYBRIS_OCC_BASE_URL,
+    occPath: process.env.HYBRIS_OCC_PATH ?? '/rest/v2',
   };
 }
 

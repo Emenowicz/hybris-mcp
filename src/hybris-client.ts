@@ -10,6 +10,8 @@ export interface HybrisConfig {
   catalogId?: string;
   catalogVersion?: string;
   hacPath?: string; // HAC path prefix, defaults to '/hac'
+  occBaseUrl?: string; // OCC host when it differs from HAC (e.g. the api.* host on CCv2), defaults to baseUrl
+  occPath?: string; // OCC path prefix, defaults to '/rest/v2'; current SAP Commerce uses '/occ/v2'
 }
 
 export interface ProductSearchResult {
@@ -192,7 +194,7 @@ export class HybrisClient {
     options: RequestInit = {}
   ): Promise<T> {
     const headers = await this.getAuthHeaders();
-    const url = `${this.config.baseUrl}${endpoint}`;
+    const url = `${this.config.occBaseUrl || this.config.baseUrl}${this.config.occPath ?? '/rest/v2'}${endpoint}`;
 
     const response = await this.fetchWithTimeout(url, {
       ...options,
@@ -313,8 +315,10 @@ export class HybrisClient {
 
     // Check if login was successful (should redirect to HAC home)
     const location = loginResponse.headers.get('location');
-    if (loginResponse.status !== 302 || !location || location.includes('error')) {
-      throw new Error('HAC login failed - check credentials');
+    // Being sent back to the login page also means failure: that is what a wrong HAC path produces
+    const target = location ? new URL(location, this.config.baseUrl) : null;
+    if (loginResponse.status !== 302 || !location || !target || /error|login/i.test(target.pathname + target.search)) {
+      throw new Error('HAC login failed - check credentials and HYBRIS_HAC_PATH');
     }
 
     // Step 3: Follow redirect to get new CSRF token for authenticated session
@@ -411,38 +415,39 @@ export class HybrisClient {
     });
 
     return this.request<ProductSearchResult>(
-      `/rest/v2/${encodeURIComponent(this.config.baseSiteId!)}/products/search?${params}`
+      `/${encodeURIComponent(this.config.baseSiteId!)}/products/search?${params}`
     );
   }
 
   async getProduct(productCode: string): Promise<Product> {
     return this.request<Product>(
-      `/rest/v2/${encodeURIComponent(this.config.baseSiteId!)}/products/${encodeURIComponent(productCode)}?fields=FULL`
+      `/${encodeURIComponent(this.config.baseSiteId!)}/products/${encodeURIComponent(productCode)}?fields=FULL`
     );
   }
 
   async getCategories(): Promise<Category[]> {
-    const result = await this.request<{ subcategories: Category[] }>(
-      `/rest/v2/${encodeURIComponent(this.config.baseSiteId!)}/catalogs/${encodeURIComponent(this.config.catalogId!)}/${encodeURIComponent(this.config.catalogVersion!)}/categories`
+    // OCC has no .../categories list endpoint: the catalog version itself carries the category tree
+    const result = await this.request<{ categories?: Category[] }>(
+      `/${encodeURIComponent(this.config.baseSiteId!)}/catalogs/${encodeURIComponent(this.config.catalogId!)}/${encodeURIComponent(this.config.catalogVersion!)}`
     );
-    return result.subcategories || [];
+    return result.categories || [];
   }
 
   async getCategory(categoryCode: string): Promise<Category> {
     return this.request<Category>(
-      `/rest/v2/${encodeURIComponent(this.config.baseSiteId!)}/catalogs/${encodeURIComponent(this.config.catalogId!)}/${encodeURIComponent(this.config.catalogVersion!)}/categories/${encodeURIComponent(categoryCode)}`
+      `/${encodeURIComponent(this.config.baseSiteId!)}/catalogs/${encodeURIComponent(this.config.catalogId!)}/${encodeURIComponent(this.config.catalogVersion!)}/categories/${encodeURIComponent(categoryCode)}`
     );
   }
 
   async getOrders(userId: string): Promise<{ orders: Order[] }> {
     return this.request<{ orders: Order[] }>(
-      `/rest/v2/${encodeURIComponent(this.config.baseSiteId!)}/users/${encodeURIComponent(userId)}/orders?fields=FULL`
+      `/${encodeURIComponent(this.config.baseSiteId!)}/users/${encodeURIComponent(userId)}/orders?fields=FULL`
     );
   }
 
   async getOrder(userId: string, orderCode: string): Promise<Order> {
     return this.request<Order>(
-      `/rest/v2/${encodeURIComponent(this.config.baseSiteId!)}/users/${encodeURIComponent(userId)}/orders/${encodeURIComponent(orderCode)}?fields=FULL`
+      `/${encodeURIComponent(this.config.baseSiteId!)}/users/${encodeURIComponent(userId)}/orders/${encodeURIComponent(orderCode)}?fields=FULL`
     );
   }
 
@@ -849,23 +854,32 @@ try {
     };
   }
 
-  // Health check - uses OCC API since HAC may not be deployed
+  // Health check - probes OCC and HAC separately, since each backs a different set of tools
   async healthCheck(): Promise<{ healthy: boolean; details: Record<string, unknown> }> {
-    try {
-      // Test connectivity via a simple product search
-      const result = await this.searchProducts('', 1, 0);
-      return {
-        healthy: true,
-        details: {
-          baseSiteId: this.config.baseSiteId,
-          totalProducts: result.pagination?.totalResults ?? 'unknown',
-        },
-      };
-    } catch (error) {
-      return {
-        healthy: false,
-        details: { error: error instanceof Error ? error.message : 'Unknown error' },
-      };
-    }
+    const probe = async (check: () => Promise<Record<string, unknown>>) => {
+      try {
+        return { ok: true, ...(await check()) };
+      } catch (error) {
+        return { ok: false, error: error instanceof Error ? error.message : 'Unknown error' };
+      }
+    };
+
+    const [occ, hac] = await Promise.all([
+      // /basesites needs neither Solr nor an existing site, unlike product search
+      probe(async () => {
+        const result = await this.request<{ baseSites?: { uid: string }[] }>('/basesites');
+        const baseSites = (result.baseSites || []).map((site) => site.uid);
+        return {
+          baseSites,
+          configuredBaseSiteFound: baseSites.includes(this.config.baseSiteId!),
+        };
+      }),
+      probe(async () => {
+        await this.ensureHacSession();
+        return {};
+      }),
+    ]);
+
+    return { healthy: occ.ok && hac.ok, details: { occ, hac } };
   }
 }
