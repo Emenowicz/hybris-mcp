@@ -20,26 +20,16 @@ const pkg = JSON.parse(readFileSync(join(__dirname, '../package.json'), 'utf-8')
 function validateString(
   args: Record<string, unknown> | undefined,
   key: string,
-  required: true
-): string;
-function validateString(
-  args: Record<string, unknown> | undefined,
-  key: string,
-  required: false
-): string | undefined;
-function validateString(
-  args: Record<string, unknown> | undefined,
-  key: string,
-  required: boolean
-): string | undefined {
+  _required: true
+): string {
   const value = args?.[key];
-  if (required && (value === undefined || value === null)) {
+  if (value === undefined || value === null) {
     throw new Error(`${key} is required`);
   }
-  if (value !== undefined && value !== null && typeof value !== 'string') {
+  if (typeof value !== 'string') {
     throw new Error(`${key} must be a string`);
   }
-  return value as string | undefined;
+  return value;
 }
 
 function validateNumber(
@@ -95,7 +85,9 @@ function getConfig(): HybrisConfig {
     baseSiteId: process.env.HYBRIS_BASE_SITE_ID || 'electronics',
     catalogId: process.env.HYBRIS_CATALOG_ID || 'electronicsProductCatalog',
     catalogVersion: process.env.HYBRIS_CATALOG_VERSION || 'Online',
-    hacPath: process.env.HYBRIS_HAC_PATH || '/hac',
+    hacPath: process.env.HYBRIS_HAC_PATH ?? '',
+    occBaseUrl: process.env.HYBRIS_OCC_BASE_URL,
+    occPath: process.env.HYBRIS_OCC_PATH ?? '/occ/v2',
   };
 }
 
@@ -265,7 +257,7 @@ const tools: Tool[] = [
   },
   {
     name: 'trigger_cronjob',
-    description: 'Trigger a cron job to run',
+    description: 'Start a cron job. Returns as soon as it is started, not when it finishes; use get_cronjobs to check the outcome',
     inputSchema: {
       type: 'object',
       properties: {
@@ -279,15 +271,10 @@ const tools: Tool[] = [
   },
   {
     name: 'clear_cache',
-    description: 'Clear the Hybris cache',
+    description: 'Clear all Hybris caches of the current tenant',
     inputSchema: {
       type: 'object',
-      properties: {
-        cacheType: {
-          type: 'string',
-          description: 'Specific cache type to clear (optional, clears all if not specified)',
-        },
-      },
+      properties: {},
     },
   },
   {
@@ -300,7 +287,7 @@ const tools: Tool[] = [
   },
   {
     name: 'trigger_catalog_sync',
-    description: 'Trigger a catalog synchronization between versions',
+    description: 'Start a catalog synchronization between versions. Returns as soon as it is started, with the code of the created sync cron job; use get_cronjobs to check the outcome',
     inputSchema: {
       type: 'object',
       properties: {
@@ -330,6 +317,20 @@ const tools: Tool[] = [
   },
 ];
 
+// Hints for MCP clients, so they can tell a lookup from a write before asking the user.
+// flexible_search and export_impex are deliberately left out: both accept arbitrary queries.
+const READ_ONLY_TOOLS = new Set([
+  'search_products',
+  'get_product',
+  'get_categories',
+  'get_category',
+  'get_orders',
+  'get_order',
+  'get_cronjobs',
+  'get_system_info',
+  'health_check',
+]);
+
 async function main() {
   const config = getConfig();
   const hybrisClient = new HybrisClient(config);
@@ -357,7 +358,13 @@ async function main() {
 
   // Handle list tools request
   server.setRequestHandler(ListToolsRequestSchema, async () => {
-    return { tools };
+    return {
+      tools: tools.map((tool) => ({
+        ...tool,
+        // destructiveHint is left out on purpose: the MCP default for a non-read-only tool is true
+        annotations: { readOnlyHint: READ_ONLY_TOOLS.has(tool.name) },
+      })),
+    };
   });
 
   // Handle tool calls
@@ -442,9 +449,7 @@ async function main() {
           break;
 
         case 'clear_cache':
-          result = await hybrisClient.clearCache(
-            validateString(args, 'cacheType', false)
-          );
+          result = await hybrisClient.clearCache();
           break;
 
         case 'get_system_info':

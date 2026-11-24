@@ -9,7 +9,9 @@ export interface HybrisConfig {
   baseSiteId?: string;
   catalogId?: string;
   catalogVersion?: string;
-  hacPath?: string; // HAC path prefix, defaults to '/hac'
+  hacPath?: string; // HAC path prefix, defaults to '' (web root, the SAP Commerce default)
+  occBaseUrl?: string; // OCC host when it differs from HAC (e.g. the api.* host on CCv2), defaults to baseUrl
+  occPath?: string; // OCC path prefix, defaults to '/occ/v2' (the SAP Commerce default)
 }
 
 export interface ProductSearchResult {
@@ -105,13 +107,13 @@ export class HybrisClient {
       baseSiteId: 'electronics',
       catalogId: 'electronicsProductCatalog',
       catalogVersion: 'Online',
-      hacPath: '/hac',
+      hacPath: '',
       ...config,
     };
   }
 
   private get hacPrefix(): string {
-    return this.config.hacPath || '/hac';
+    return this.config.hacPath ?? '';
   }
 
   private async fetchWithTimeout(url: string, options: RequestInit = {}): Promise<Response> {
@@ -192,7 +194,7 @@ export class HybrisClient {
     options: RequestInit = {}
   ): Promise<T> {
     const headers = await this.getAuthHeaders();
-    const url = `${this.config.baseUrl}${endpoint}`;
+    const url = `${this.config.occBaseUrl || this.config.baseUrl}${this.config.occPath ?? '/occ/v2'}${endpoint}`;
 
     const response = await this.fetchWithTimeout(url, {
       ...options,
@@ -313,8 +315,10 @@ export class HybrisClient {
 
     // Check if login was successful (should redirect to HAC home)
     const location = loginResponse.headers.get('location');
-    if (loginResponse.status !== 302 || !location || location.includes('error')) {
-      throw new Error('HAC login failed - check credentials');
+    // Being sent back to the login page also means failure: that is what a wrong HAC path produces
+    const target = location ? new URL(location, this.config.baseUrl) : null;
+    if (loginResponse.status !== 302 || !location || !target || /error|login/i.test(target.pathname + target.search)) {
+      throw new Error('HAC login failed - check credentials and HYBRIS_HAC_PATH');
     }
 
     // Step 3: Follow redirect to get new CSRF token for authenticated session
@@ -411,38 +415,39 @@ export class HybrisClient {
     });
 
     return this.request<ProductSearchResult>(
-      `/rest/v2/${encodeURIComponent(this.config.baseSiteId!)}/products/search?${params}`
+      `/${encodeURIComponent(this.config.baseSiteId!)}/products/search?${params}`
     );
   }
 
   async getProduct(productCode: string): Promise<Product> {
     return this.request<Product>(
-      `/rest/v2/${encodeURIComponent(this.config.baseSiteId!)}/products/${encodeURIComponent(productCode)}?fields=FULL`
+      `/${encodeURIComponent(this.config.baseSiteId!)}/products/${encodeURIComponent(productCode)}?fields=FULL`
     );
   }
 
   async getCategories(): Promise<Category[]> {
-    const result = await this.request<{ subcategories: Category[] }>(
-      `/rest/v2/${encodeURIComponent(this.config.baseSiteId!)}/catalogs/${encodeURIComponent(this.config.catalogId!)}/${encodeURIComponent(this.config.catalogVersion!)}/categories`
+    // OCC has no .../categories list endpoint: the catalog version itself carries the category tree
+    const result = await this.request<{ categories?: Category[] }>(
+      `/${encodeURIComponent(this.config.baseSiteId!)}/catalogs/${encodeURIComponent(this.config.catalogId!)}/${encodeURIComponent(this.config.catalogVersion!)}`
     );
-    return result.subcategories || [];
+    return result.categories || [];
   }
 
   async getCategory(categoryCode: string): Promise<Category> {
     return this.request<Category>(
-      `/rest/v2/${encodeURIComponent(this.config.baseSiteId!)}/catalogs/${encodeURIComponent(this.config.catalogId!)}/${encodeURIComponent(this.config.catalogVersion!)}/categories/${encodeURIComponent(categoryCode)}`
+      `/${encodeURIComponent(this.config.baseSiteId!)}/catalogs/${encodeURIComponent(this.config.catalogId!)}/${encodeURIComponent(this.config.catalogVersion!)}/categories/${encodeURIComponent(categoryCode)}`
     );
   }
 
   async getOrders(userId: string): Promise<{ orders: Order[] }> {
     return this.request<{ orders: Order[] }>(
-      `/rest/v2/${encodeURIComponent(this.config.baseSiteId!)}/users/${encodeURIComponent(userId)}/orders?fields=FULL`
+      `/${encodeURIComponent(this.config.baseSiteId!)}/users/${encodeURIComponent(userId)}/orders?fields=FULL`
     );
   }
 
   async getOrder(userId: string, orderCode: string): Promise<Order> {
     return this.request<Order>(
-      `/rest/v2/${encodeURIComponent(this.config.baseSiteId!)}/users/${encodeURIComponent(userId)}/orders/${encodeURIComponent(orderCode)}?fields=FULL`
+      `/${encodeURIComponent(this.config.baseSiteId!)}/users/${encodeURIComponent(userId)}/orders/${encodeURIComponent(orderCode)}?fields=FULL`
     );
   }
 
@@ -454,7 +459,7 @@ export class HybrisClient {
       maxCount: maxCount.toString(),
     });
 
-    return this.hacRequest<FlexibleSearchResult>(
+    const result = await this.hacRequest<FlexibleSearchResult & { exception?: { message?: string } | null }>(
       `${this.hacPrefix}/console/flexsearch/execute`,
       {
         method: 'POST',
@@ -464,6 +469,14 @@ export class HybrisClient {
         body: formData,
       }
     );
+
+    // A failed query comes back as HTTP 200 with a serialized Java exception
+    if (result.exception) {
+      throw new Error(
+        `FlexibleSearch failed: ${this.sanitizeErrorMessage(result.exception.message || 'unknown error', 2000)}`
+      );
+    }
+    return result;
   }
 
   async executeGroovyScript(script: string, commit = false): Promise<{ output: string; result: unknown }> {
@@ -487,6 +500,14 @@ export class HybrisClient {
         body: formData,
       }
     );
+
+    // A script that throws comes back as HTTP 200 with only stacktraceText set
+    if (response.stacktraceText) {
+      const output = response.outputText ? `\nOutput before failure:\n${response.outputText}` : '';
+      throw new Error(
+        `Groovy script failed:\n${this.sanitizeErrorMessage(response.stacktraceText, 2000)}${output}`
+      );
+    }
 
     // Map HAC response fields to our expected format
     return {
@@ -593,7 +614,7 @@ try {
     // Simple export format
     sb.append("INSERT_UPDATE ").append(itemType).append(";pk[unique=true]\\n")
     searchResult.result.each { item ->
-        sb.append(";").append(item.PK.toString()).append("\\n")
+        sb.append(";").append(item.pk.toString()).append("\\n")
     }
 
     println "SUCCESS: Exported " + searchResult.result.size() + " items"
@@ -620,7 +641,8 @@ try {
   async getCronJobs(): Promise<{ cronJobs: { code: string; active: boolean; status: string }[] }> {
     // Use FlexibleSearch to get cron jobs as HAC doesn't have a direct API
     const result = await this.executeFlexibleSearch(
-      "SELECT {code}, {active}, {status} FROM {CronJob} ORDER BY {code}",
+      // status is an enum reference: without the join it comes back as a raw PK
+      "SELECT {c.code} AS code, {c.active} AS active, {s.code} AS status FROM {CronJob AS c LEFT JOIN CronJobStatus AS s ON {c.status} = {s.pk}} ORDER BY {c.code}",
       1000
     );
 
@@ -638,7 +660,8 @@ try {
     return {
       cronJobs: resultList.map((row) => ({
         code: String(row[codeIdx >= 0 ? codeIdx : 0] || ''),
-        active: row[activeIdx >= 0 ? activeIdx : 1] === true || row[activeIdx >= 0 ? activeIdx : 1] === 'true',
+        // HAC serializes booleans as "1"/"0" on some databases and "true"/"false" on others
+        active: ['true', '1'].includes(String(row[activeIdx >= 0 ? activeIdx : 1])),
         status: String(row[statusIdx >= 0 ? statusIdx : 2] || ''),
       })),
     };
@@ -656,47 +679,31 @@ if (cronJob == null) {
     println "CronJob not found: ${escapedCode}"
     return "NOT_FOUND"
 }
-cronJobService.performCronJob(cronJob, true)
+// Asynchronous: a long job must not outlive the HTTP request timeout
+cronJobService.performCronJob(cronJob, false)
 println "CronJob triggered: ${escapedCode}"
 return "SUCCESS"
 `;
-    const result = await this.executeGroovyScript(script);
+    // commit=true: the job runs in another thread, outside this script's transaction
+    const result = await this.executeGroovyScript(script, true);
     const output = result.output || '';
     const execResult = String(result.result || '');
     const success = output.includes('triggered') || execResult === 'SUCCESS';
     return {
       success,
       message: success
-        ? `CronJob ${cronJobCode} triggered`
+        ? `CronJob ${cronJobCode} started`
         : `Failed to trigger ${cronJobCode}: ${output || execResult || 'Unknown error'}`,
     };
   }
 
-  async clearCache(cacheType?: string): Promise<{ success: boolean; message: string }> {
-    // Use Groovy script to clear cache
-    const escapedType = cacheType ? this.escapeGroovyString(cacheType) : '';
+  async clearCache(): Promise<{ success: boolean; message: string }> {
     const script = `
 import de.hybris.platform.core.Registry
 
-def cacheType = "${escapedType}"
-
-if (cacheType == "all" || cacheType == "") {
-    Registry.getCurrentTenant().getCache().clear()
-    println "All caches cleared"
-    return "SUCCESS"
-} else {
-    // Clear specific cache region if supported
-    try {
-        def cacheController = spring.getBean("cacheController")
-        cacheController.clearCache()
-        println "Cache cleared: " + cacheType
-        return "SUCCESS"
-    } catch (Exception e) {
-        Registry.getCurrentTenant().getCache().clear()
-        println "Cleared all caches (specific cache type not supported)"
-        return "SUCCESS"
-    }
-}
+Registry.getCurrentTenant().getCache().clear()
+println "All caches cleared"
+return "SUCCESS"
 `;
     const result = await this.executeGroovyScript(script);
     const output = result.output || '';
@@ -821,8 +828,8 @@ try {
     modelService.save(syncCronJob)
     println "Created sync cronjob: " + syncCronJob.code
 
-    // Trigger the cronjob
-    cronJobService.performCronJob(syncCronJob, true)
+    // Trigger the cronjob asynchronously: a sync can run far longer than the HTTP request timeout
+    cronJobService.performCronJob(syncCronJob, false)
 
     println "SUCCESS: Catalog sync triggered: ${escapedCatalogId} ${escapedSource} -> ${escapedTarget}"
     return "SUCCESS"
@@ -832,36 +839,47 @@ try {
     return "ERROR: " + e.getMessage()
 }
 `;
-    const result = await this.executeGroovyScript(script);
+    // commit=true: the saved cronjob must be visible to the thread that runs it
+    const result = await this.executeGroovyScript(script, true);
     const output = result.output || '';
     const execResult = String(result.result || '');
     const success = output.includes('SUCCESS:') || execResult === 'SUCCESS';
     const errorMatch = output.match(/ERROR: (.+)/);
+    const cronJobCode = output.match(/Created sync cronjob: (\S+)/)?.[1];
     return {
       success,
       message: success
-        ? `Catalog sync triggered: ${catalogId} ${sourceVersion} -> ${targetVersion}`
+        ? `Catalog sync started: ${catalogId} ${sourceVersion} -> ${targetVersion} (cron job ${cronJobCode ?? 'unknown'})`
         : errorMatch ? errorMatch[1] : `Failed to sync: ${output || execResult || 'Unknown error'}`,
     };
   }
 
-  // Health check - uses OCC API since HAC may not be deployed
+  // Health check - probes OCC and HAC separately, since each backs a different set of tools
   async healthCheck(): Promise<{ healthy: boolean; details: Record<string, unknown> }> {
-    try {
-      // Test connectivity via a simple product search
-      const result = await this.searchProducts('', 1, 0);
-      return {
-        healthy: true,
-        details: {
-          baseSiteId: this.config.baseSiteId,
-          totalProducts: result.pagination?.totalResults ?? 'unknown',
-        },
-      };
-    } catch (error) {
-      return {
-        healthy: false,
-        details: { error: error instanceof Error ? error.message : 'Unknown error' },
-      };
-    }
+    const probe = async (check: () => Promise<Record<string, unknown>>) => {
+      try {
+        return { ok: true, ...(await check()) };
+      } catch (error) {
+        return { ok: false, error: error instanceof Error ? error.message : 'Unknown error' };
+      }
+    };
+
+    const [occ, hac] = await Promise.all([
+      // /basesites needs neither Solr nor an existing site, unlike product search
+      probe(async () => {
+        const result = await this.request<{ baseSites?: { uid: string }[] }>('/basesites');
+        const baseSites = (result.baseSites || []).map((site) => site.uid);
+        return {
+          baseSites,
+          configuredBaseSiteFound: baseSites.includes(this.config.baseSiteId!),
+        };
+      }),
+      probe(async () => {
+        await this.ensureHacSession();
+        return {};
+      }),
+    ]);
+
+    return { healthy: occ.ok && hac.ok, details: { occ, hac } };
   }
 }

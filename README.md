@@ -35,7 +35,9 @@ Configure via environment variables:
 | `HYBRIS_BASE_SITE_ID` | No | OCC base site ID | `electronics` |
 | `HYBRIS_CATALOG_ID` | No | Product catalog ID | `electronicsProductCatalog` |
 | `HYBRIS_CATALOG_VERSION` | No | Catalog version | `Online` |
-| `HYBRIS_HAC_PATH` | No | HAC path prefix | `/hac` |
+| `HYBRIS_HAC_PATH` | No | HAC path prefix. Set it to `/hac` when `hac.webroot=/hac` (CCv2 and most accelerator setups) | empty (web root) |
+| `HYBRIS_OCC_PATH` | No | OCC path prefix. Legacy `ycommercewebservices` setups use `/rest/v2` | `/occ/v2` |
+| `HYBRIS_OCC_BASE_URL` | No | OCC host, when it differs from the HAC host (e.g. the `api.*` host on CCv2) | `HYBRIS_BASE_URL` |
 
 ### Common Configurations
 
@@ -52,6 +54,7 @@ HYBRIS_BASE_URL=https://backoffice.your-environment.model-t.cc.commerce.ondemand
 HYBRIS_USERNAME=admin
 HYBRIS_PASSWORD=your-password
 HYBRIS_HAC_PATH=/hac
+HYBRIS_OCC_BASE_URL=https://api.your-environment.model-t.cc.commerce.ondemand.com
 ```
 
 **Custom Site Configuration:**
@@ -277,7 +280,9 @@ Required environment variables:
 
 ### Administration (HAC) - Full Support
 
-All HAC-based tools work reliably with Basic authentication:
+HAC-based tools log in to HAC with the configured credentials (form login and CSRF token, handled automatically).
+
+`trigger_cronjob` and `trigger_catalog_sync` return as soon as the job is started, not when it finishes. Use `get_cronjobs` to check the outcome. Each catalog sync creates a cron job named `mcp_sync_<timestamp>`.
 
 | Tool | Description |
 |------|-------------|
@@ -295,11 +300,11 @@ All HAC-based tools work reliably with Basic authentication:
 
 | Tool | Description | Notes |
 |------|-------------|-------|
-| `health_check` | Check system health | Always works |
+| `health_check` | Check that OCC and HAC are reachable | Reports each separately |
 | `get_product` | Get detailed product information by code | Works with Basic auth |
 | `get_category` | Get category details by code | Works with Basic auth |
 | `search_products` | Search for products in the catalog | Requires Solr indexing* |
-| `get_categories` | List all categories in the catalog | Endpoint may not be exposed* |
+| `get_categories` | List the categories of the configured catalog version | Works with Basic auth |
 
 ### Orders (OCC API)
 
@@ -370,17 +375,6 @@ The `search_products` tool uses the OCC search endpoint which requires Solr inde
 **Workaround**: Use `flexible_search` to query products:
 ```sql
 SELECT {pk}, {code}, {name[en]} FROM {Product} WHERE {name[en]} LIKE '%search_term%'
-```
-
-### Categories Endpoint May Not Be Exposed
-
-The `get_categories` tool uses an OCC endpoint that may not be exposed in all Hybris configurations.
-
-**Workaround**: Use `flexible_search` to query categories:
-```sql
-SELECT {pk}, {code}, {name[en]} FROM {Category} WHERE {catalogVersion} IN (
-  {{ SELECT {pk} FROM {CatalogVersion} WHERE {version} = 'Online' }}
-)
 ```
 
 ## Security Notes
